@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#1B1A18"/>
+  <path d="M256 400 C 150 330 96 270 96 206 C 96 160 132 128 176 128 C 208 128 236 146 256 178 C 276 146 304 128 336 128 C 380 128 416 160 416 206 C 416 270 362 330 256 400 Z" fill="#CC3B33"/>
+  <text x="256" y="470" font-family="Georgia, serif" font-size="72" fill="#EDECE8" text-anchor="middle">EDIT</text>
+</svg>

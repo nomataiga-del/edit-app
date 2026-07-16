@@ -1,0 +1,144 @@
+/* Fonts: system fallback (Fraunces=serif display, Inter=body). A remote
+   @import is intentionally NOT used — MV3's extension CSP blocks external
+   stylesheets/fonts, and it would break the privacy claim (no external
+   requests). To restore the Fraunces/Inter look, bundle the .woff2 files
+   under extension/fonts/ and add local @font-face rules here. */
+
+:root{
+  --paper:#EDECE8; --card:#FBFBF9; --ink:#1B1A18; --inkSoft:#46433D;
+  --stone:#8E8B84; --line:#DEDCD4; --accent:#CC3B33;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;}
+body{
+  width:760px; height:580px; overflow:hidden;
+  background:var(--paper); color:var(--ink);
+  font-family:Inter,system-ui,sans-serif; font-size:14px;
+}
+.serif{font-family:Fraunces,Georgia,serif;}
+#app{display:flex; flex-direction:column; height:100%;}
+
+/* Full-tab layout: fill the viewport whenever shown in a window larger than a
+   Chrome popup (popups are capped ~800x600). Pure CSS — no JS/class timing, so
+   it can't get stuck at popup size. Applies in a browser tab automatically. */
+@media (min-width: 820px), (min-height: 640px) {
+  html, body { width: 100% !important; height: 100vh !important; height: 100dvh !important; }
+  #app { max-width: 1600px; margin: 0 auto; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+  .scroll { flex: 1 1 auto; min-height: 0; padding: 10px 28px 28px; }
+  .hdr, .filters, .cattabs, .meta { padding-left: 28px; padding-right: 28px; }
+  .thumb { aspect-ratio: 1 / 1; } /* denser cards -> more rows visible */
+  .hdr { padding-top: 10px; padding-bottom: 10px; }
+}
+
+/* header */
+.hdr{display:flex; align-items:center; gap:14px; padding:12px 16px; border-bottom:1px solid var(--line);}
+.brand{display:flex; align-items:baseline; gap:8px;}
+.brand .wm{font-size:22px; letter-spacing:.14em; font-weight:600;}
+.brand .sub{font-size:10px; color:var(--stone); letter-spacing:.16em;}
+.search{flex:1; position:relative;}
+.search input{width:100%; padding:8px 12px 8px 30px; border-radius:999px; border:1px solid var(--line); background:var(--card); color:var(--ink); font-size:13px;}
+.search .ic{position:absolute; left:11px; top:7px; color:var(--stone);}
+.btn{font-family:inherit; cursor:pointer; border:none; border-radius:999px; font-size:13px;}
+.btn-ink{background:var(--ink); color:var(--paper); padding:8px 15px; font-weight:500;}
+.btn-ghost{background:transparent; border:1px solid var(--line); color:var(--inkSoft); padding:7px 13px;}
+.btn:focus-visible, input:focus, select:focus{outline:2px solid var(--ink); outline-offset:2px;}
+
+/* filter row */
+.filters{display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:10px 16px 4px;}
+.chip{border:1px solid var(--line); background:transparent; color:var(--inkSoft); padding:5px 11px; border-radius:999px; font-size:12px; cursor:pointer; display:inline-flex; align-items:center; gap:5px;}
+.chip.on{background:var(--ink); color:var(--paper); border-color:var(--ink);}
+.chip .dot{width:6px; height:6px; border-radius:99px; background:var(--accent);}
+.chip.on .dot{background:var(--paper);}
+.sep{width:1px; height:16px; background:var(--line); margin:0 3px;}
+.spacer{margin-left:auto;}
+select{padding:7px 10px; border-radius:9px; border:1px solid var(--line); background:var(--card); color:var(--inkSoft); font-size:12px; font-family:inherit; cursor:pointer;}
+.meta{padding:6px 16px 4px; font-size:11.5px; color:var(--stone); display:flex; gap:14px;}
+.meta b{color:var(--accent); font-weight:600;}
+
+/* grid */
+.scroll{flex:1; overflow-y:auto; padding:8px 16px 16px;}
+.grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(165px,1fr)); gap:12px;}
+.card{background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; display:flex; flex-direction:column;}
+.thumb{position:relative; aspect-ratio:4/5; background:#EFEEEA; overflow:hidden;}
+.thumb img{width:100%; height:100%; object-fit:cover; display:block;}
+.thumb .ph{display:flex; align-items:center; justify-content:center; height:100%; font-size:30px; color:var(--stone); opacity:.55;}
+.heart{position:absolute; top:7px; right:7px; width:28px; height:28px; border-radius:99px; border:none; cursor:pointer; background:rgba(255,255,255,.92); font-size:13px; box-shadow:0 2px 8px -2px rgba(0,0,0,.25);}
+.acts{position:absolute; left:7px; right:7px; bottom:7px; display:flex; gap:5px; justify-content:flex-end; flex-wrap:wrap; opacity:0; transition:opacity .15s;}
+.card:hover .acts{opacity:1;}
+.iconbtn{width:26px; height:26px; border-radius:7px; border:none; cursor:pointer; background:rgba(255,255,255,.92); color:var(--inkSoft); font-size:12px; box-shadow:0 2px 8px -2px rgba(0,0,0,.25);}
+.badge{position:absolute; bottom:7px; left:7px; background:var(--ink); color:var(--paper); font-size:9.5px; padding:2px 7px; border-radius:99px;}
+.body{padding:9px 10px 10px; display:flex; flex-direction:column; gap:5px; flex:1;}
+.tag{display:inline-flex; align-items:center; gap:5px; background:#fff; border:1px solid var(--line); border-radius:4px; padding:2px 7px 2px 5px; width:fit-content; max-width:100%;}
+.tag .hole{width:5px;height:5px;border-radius:99px;border:1.5px solid var(--stone);}
+.tag img{width:12px;height:12px;border-radius:2px;}
+.tag span{font-size:10.5px; color:var(--inkSoft); font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.brand-l{font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--stone);}
+.name{font-size:12.5px; line-height:1.3; font-weight:500; color:inherit; text-decoration:none; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;}
+.note{font-size:11px; color:var(--stone);}
+.foot{margin-top:auto; display:flex; align-items:center; justify-content:space-between; padding-top:5px;}
+.price{font-size:15px; font-weight:600;}
+.price.bought{text-decoration:line-through; color:var(--stone);}
+.cmp{display:inline-flex; align-items:center; gap:4px; font-size:11px; color:var(--stone); cursor:pointer;}
+.cmp input{accent-color:var(--ink); cursor:pointer;}
+
+/* empty */
+.empty{text-align:center; padding:50px 20px; color:var(--stone);}
+.empty .t{font-size:20px; color:var(--ink); margin-bottom:8px;}
+
+/* compare bar + modal */
+.bar{position:absolute; left:0; right:0; bottom:0; background:var(--ink); color:var(--paper); padding:10px 16px; display:flex; align-items:center; gap:12px;}
+.bar .btn-ghost{color:var(--paper); border-color:rgba(255,255,255,.3);}
+.bar .btn-light{background:var(--paper); color:var(--ink); padding:7px 16px; font-weight:600;}
+.bar .btn-light:disabled{background:rgba(255,255,255,.25); color:rgba(255,255,255,.6); cursor:default;}
+
+.overlay{position:fixed; inset:0; background:rgba(20,18,15,.45); display:flex; align-items:center; justify-content:center; padding:14px; z-index:50;}
+.modal{background:var(--card); border-radius:16px; width:100%; max-height:92%; overflow:auto; padding:20px;}
+.modal.sm{max-width:440px;}
+.modal h2{margin:0 0 14px; font-size:20px;}
+.row{display:flex; gap:10px;}
+.fld{margin-bottom:12px; flex:1; min-width:0;}
+.fld label{display:block; font-size:11.5px; color:var(--stone); margin-bottom:5px; font-weight:500;}
+.fld input, .fld select{width:100%; padding:8px 11px; border-radius:9px; border:1px solid var(--line); background:#fff; color:var(--ink); font-size:13.5px; font-family:inherit;}
+.seg{display:flex; gap:7px;}
+.seg button{flex:1; padding:8px 0; border-radius:9px; border:1px solid var(--line); background:transparent; color:var(--inkSoft); font-size:12.5px; cursor:pointer;}
+.seg button.on{background:var(--ink); color:var(--paper); border-color:var(--ink);}
+.modal-foot{display:flex; gap:9px; justify-content:flex-end; margin-top:14px;}
+.x{background:transparent; border:none; font-size:19px; color:var(--stone); cursor:pointer; float:right;}
+
+table.cmp-t{border-collapse:collapse; width:100%;}
+.cmp-t th, .cmp-t td{border-bottom:1px solid var(--line); padding:9px 8px; font-size:12.5px; text-align:center; vertical-align:top;}
+.cmp-t th .ti{aspect-ratio:1/1; border-radius:9px; background:#EFEEEA; overflow:hidden; margin-bottom:7px;}
+.cmp-t th .ti img{width:100%;height:100%;object-fit:cover;}
+.cmp-t td.lbl{color:var(--stone); font-weight:500; font-size:11.5px; text-align:left; width:78px;}
+.cheap{color:var(--accent); font-weight:600;}
+::-webkit-scrollbar{width:9px;} ::-webkit-scrollbar-thumb{background:var(--line); border-radius:8px;}
+
+
+/* app.css — mobile/PWA overrides appended after popup.css.
+   The popup CSS assumes a fixed 760x580 popup; here we fill the screen. */
+html, body { width: 100% !important; height: 100vh !important; height: 100dvh !important; overflow: hidden; background: var(--paper); }
+#app { width: 100% !important; max-width: 720px; margin: 0 auto; }
+
+/* touch-friendlier controls */
+.grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)) !important; }
+.iconbtn { width: 32px; height: 32px; font-size: 14px; }
+.heart { width: 34px; height: 34px; font-size: 15px; }
+.chip { padding: 6px 11px; }
+.btn-ink, .btn-light, .btn-ghost { padding: 9px 13px; }
+
+/* On touch devices there's no hover: keep the card actions visible (they sit
+   along the bottom edge; state badges are top-left, heart top-right). */
+@media (hover: none) {
+  .acts { opacity: 1 !important; }
+}
+
+@media (max-width: 560px) {
+  .hdr { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+  .hdr .search { order: 3; flex: 1 1 100%; }
+  .filters { padding: 8px 12px 4px; }
+  .scroll { padding: 8px 12px 24px; }
+}
+
+/* iOS safe-area padding at the bottom */
+.scroll { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
