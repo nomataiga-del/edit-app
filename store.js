@@ -60,6 +60,11 @@ export async function getFx() {
 }
 export async function setFx(fx) { await chrome.storage.local.set({ [KEY_FX]: fx }); }
 
+// Optional extract-proxy (Cloudflare Worker) URL for non-Shopify sites on mobile.
+export const KEY_WORKER = "edit_worker_v1";
+export async function getWorker() { const r = await chrome.storage.local.get(KEY_WORKER); return (r[KEY_WORKER] || "").trim(); }
+export async function setWorker(u) { await chrome.storage.local.set({ [KEY_WORKER]: (u || "").trim() }); }
+
 // Normalize a currency symbol or code to a map key (e.g. "€"->"EUR").
 export function currencyCode(cur) {
   const m = { "¥": "JPY", "￥": "JPY", "$": "USD", "€": "EUR", "£": "GBP", "₩": "KRW" };

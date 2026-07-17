@@ -9,6 +9,7 @@ import {
   getBases, setBases, pruneBaseItem, measureFieldsFor, toCm, diffVsBase, parseMeasures,
   ensureSeeded, sourceKind, effectiveSource, SEED_BASE,
   getFx, setFx, defaultFx, toJPY, currencyCode,
+  getWorker, setWorker,
 } from "./store.js";
 import { extractProduct, DOMAIN_RULES, shopifyProductJsonUrl, shopifyFromJson, guessCategory } from "./extract.js";
 
@@ -32,6 +33,7 @@ let outfits = [];
 let cats = defaultCategories(); // user-customizable category config
 let bases = {};                 // { [major]: itemId } base garment per major
 let fx = defaultFx();           // manual FX rates (yen per unit)
+let workerUrl = "";             // optional extract-proxy for non-Shopify (mobile)
 let viewMode = "items"; // "items" | "outfits"
 let query = "", fSite = "すべて", fStatus = "すべて", fMajor = "すべて", fSub = "すべて", sort = "new";
 let fOfficialOnly = false; // 軸a: show only brand-official (non-marketplace) items
@@ -90,10 +92,12 @@ function buildShell() {
     !window.__EDIT_WEB__ ? el("button", { class: "btn", style: miStyle, text: "右下ボタンの表示／非表示", onclick: async () => { const r = await chrome.storage.local.get("edit_hidebtn_v1"); const next = !(r && r.edit_hidebtn_v1); await chrome.storage.local.set({ edit_hidebtn_v1: next }); menu.classList.remove("open"); alert(next ? "右下の追加ボタンを非表示にしました（各ページは再読み込みで反映。右クリック「EDITに追加」は使えます）" : "右下の追加ボタンを表示にしました（再読み込みで反映）"); } }) : null,
     el("button", { class: "btn", style: miStyle, text: "カテゴリ設定", onclick: () => { menu.classList.remove("open"); openCategorySettings(); } }),
     el("button", { class: "btn", style: miStyle, text: "為替レート設定", onclick: () => { menu.classList.remove("open"); openFxSettings(); } }),
+    el("button", { class: "btn", style: miStyle, text: "取得代行URLを設定", onclick: async () => { menu.classList.remove("open"); const cur = await getWorker(); const v = prompt("取得代行(Cloudflare Worker)のURL\n例: https://edit-extract.xxxx.workers.dev\n（空欄で無効化）", cur || ""); if (v !== null) { await setWorker(v); workerUrl = v.trim(); alert(v.trim() ? "設定しました。非Shopifyサイトも 共有→自動取得 を試します。" : "取得代行を無効化しました。"); } } }),
     window.__EDIT_WEB__ ? el("button", { class: "btn", style: miStyle, text: "ブックマークレット設定", onclick: () => { menu.classList.remove("open"); openBookmarkletHelp(); } }) : null,
     el("div", { style: "height:1px;background:var(--line);margin:5px 3px;" }),
     el("button", { class: "btn", style: miStyle, text: "エクスポート（JSON）", onclick: async () => { await exportJson(); menu.classList.remove("open"); } }),
     el("button", { class: "btn", style: miStyle, text: "インポート（JSON）", onclick: () => fileInput.click() }),
+    el("button", { class: "btn", style: miStyle, text: "全アイテムを再取得（Shopify）", onclick: async () => { menu.classList.remove("open"); await refetchAllShopify(); } }),
     el("button", { class: "btn", style: miStyle, text: "サイズ基準を再登録（UNIQLO）", onclick: async () => { menu.classList.remove("open"); await reseedBase(); } }),
     el("div", { style: "height:1px;background:var(--line);margin:5px 3px;" }),
     el("button", { class: "btn", style: miStyle + "color:var(--accent);", text: "すべて削除", onclick: async () => { if (confirm("すべてのアイテムを削除します（サイズ基準のUNIQLOも消えます）。よろしいですか？\n※ 基準は⋯メニュー「サイズ基準を再登録」で戻せます。")) { await setItems([]); } menu.classList.remove("open"); } }),
@@ -608,6 +612,7 @@ async function reload() {
   cats = await getCategories();
   bases = await getBases();
   fx = await getFx();
+  workerUrl = await getWorker();
   // persist one-time category migration (idempotent on subsequent loads)
   const changed = items.some((it, i) => it.major !== raw[i].major || it.sub !== raw[i].sub);
   if (changed) await setItems(items);
@@ -772,7 +777,26 @@ async function webCaptureUrl(url, fallbackName) {
       }
     } catch { /* fall through to manual */ }
   }
-  openWebAdd({ url, name: fallbackName || "" }); // non-Shopify: manual (rest can't be read cross-origin)
+  // non-Shopify: use the extract proxy (Cloudflare Worker) if configured
+  if (workerUrl) {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 12000);
+      const r = await fetch(workerUrl.replace(/\/$/, "") + "/?url=" + encodeURIComponent(url), { signal: ctl.signal }).finally(() => clearTimeout(t));
+      if (r.ok) {
+        const d = await r.json();
+        if (d && !d.error && (d.name || d.image || d.price)) {
+          let host = ""; try { host = new URL(url).hostname.replace(/^www\./, ""); } catch { /* noop */ }
+          const cur = d.currency || guessCurrencyByTld(host);
+          const g = (d.major || d.sub) ? { major: d.major || "", sub: d.sub || "" } : guessCategory([d.name, fallbackName].join(" "));
+          await addItem({ url, domain: host, site: d.site || siteNameFromDomain(host), name: d.name || fallbackName || "", brand: d.brand || "", price: d.price || "", currency: cur, image: d.image || "", availability: d.availability || "", sizes: d.sizes || "", colors: d.colors || "", color: d.color || "", major: g.major, sub: g.sub });
+          toast("♥ 自動で追加しました");
+          return true;
+        }
+      }
+    } catch { /* fall through to manual */ }
+  }
+  openWebAdd({ url, name: fallbackName || "" }); // no proxy / failed: manual
   return false;
 }
 
@@ -810,6 +834,28 @@ function openWebAdd(prefill = {}) {
     ]),
   ]);
   overlay.append(modal); document.body.append(overlay);
+}
+
+// Re-fetch all Shopify items from their .js (heals existing items after a fix,
+// e.g. corrected price / newly-supported fields). Non-Shopify items are skipped.
+async function refetchAllShopify() {
+  const its = await getItems();
+  let ok = 0, skip = 0;
+  for (const it of its) {
+    const jsUrl = shopifyProductJsonUrl(it.url);
+    if (!jsUrl) { skip++; continue; }
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 8000);
+      const r = await fetch(jsUrl, { credentials: "omit", signal: ctl.signal }).finally(() => clearTimeout(t));
+      if (!r.ok) { skip++; continue; }
+      const s = shopifyFromJson(await r.json(), { currency: it.currency || guessCurrencyByTld(it.domain), href: it.url });
+      const patch = {};
+      for (const k of ["price", "image", "name", "brand", "availability", "sizes", "colors"]) if (s && s[k]) patch[k] = s[k];
+      if (Object.keys(patch).length) { await patchItem(it.id, patch); ok++; } else skip++;
+    } catch { skip++; }
+  }
+  alert(`再取得しました：${ok} 件更新 / ${skip} 件は対象外（Shopify以外など）`);
 }
 
 // Re-add the UNIQLO size base (after an accidental "すべて削除").
