@@ -110,12 +110,13 @@ export function biggestImage(doc) {
 export function shopifyProductJsonUrl(href) {
   try {
     const u = new URL(href);
-    const m = u.pathname.match(/(.*\/products\/[^/?#]+)/);
+    // Shopify product URLs are exactly /products/<handle> (handle = last segment).
+    // Excludes /products/detail/123 (EC-CUBE etc.) which is NOT Shopify.
+    const m = u.pathname.match(/^(.*\/products\/[^/?#]+)\/?$/);
     return m ? u.origin + m[1] + ".js" : "";
   } catch { return ""; }
 }
 
-const ZERO_DECIMAL = ["JPY", "KRW", "VND", "CLP", "IDR"];
 
 // Pull the size list from a Shopify product's options/variants.
 export function shopifySizes(p) {
@@ -159,12 +160,13 @@ export function shopifyColors(p) {
 export function shopifyFromJson(p, opts = {}) {
   if (!p || typeof p !== "object") return null;
   const code = String(opts.currency || "").toUpperCase();
-  const div = ZERO_DECIMAL.includes(code) ? 1 : 100; // Shopify price is in minor units
+  // Shopify's AJAX (.js) price is ALWAYS integer × 100 — even for JPY
+  // (verified: LEMAIRE €590→59000, kindal ¥198,550→19855000). Always /100.
   const img = p.featured_image || (Array.isArray(p.images) && p.images[0]) || "";
   return {
     name: p.title ? String(p.title) : "",
     brand: p.vendor ? String(p.vendor) : "",
-    price: p.price != null && !isNaN(Number(p.price)) ? String(Math.round(Number(p.price) / div)) : "",
+    price: p.price != null && !isNaN(Number(p.price)) ? String(Math.round(Number(p.price) / 100)) : "",
     currency: code,
     image: img ? absUrl(img, opts.href || "") : "",
     availability: p.available === true ? "instock" : (p.available === false ? "outofstock" : ""),
@@ -197,7 +199,8 @@ const CATEGORY_KEYWORDS = [
 ];
 
 export function guessCategory(text) {
-  const t = String(text || "");
+  // strip zero-width / invisible chars (some sites inject them, breaking「シャツ」etc.)
+  const t = String(text || "").replace(/[​‌‍⁠﻿­]/g, "");
   if (!t.trim()) return { major: "", sub: "" };
   for (const [major, sub, re] of CATEGORY_KEYWORDS) {
     if (re.test(t)) return { major, sub };

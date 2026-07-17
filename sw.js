@@ -1,6 +1,6 @@
 // Minimal offline service worker: cache-first for same-origin app shell.
 // Cache name carries the build version so a new release busts the old cache.
-const CACHE = "edit-pwa-1.1.14";
+const CACHE = "edit-pwa-1.1.15";
 const ASSETS = [
   "./", "index.html", "app.css", "chrome-shim.js", "bookmarklet.js",
   "store.js", "extract.js", "popup.js", "manifest.webmanifest", "icon.svg", "icon-128.png",

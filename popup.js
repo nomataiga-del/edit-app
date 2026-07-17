@@ -748,7 +748,9 @@ async function webCaptureUrl(url, fallbackName) {
   const jsUrl = shopifyProductJsonUrl(url);
   if (jsUrl) {
     try {
-      const r = await fetch(jsUrl, { credentials: "omit" });
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 8000); // never hang on a slow/bad host
+      const r = await fetch(jsUrl, { credentials: "omit", signal: ctl.signal }).finally(() => clearTimeout(t));
       if (r.ok) {
         const host = new URL(url).hostname;
         const domain = host.replace(/^www\./, "");
