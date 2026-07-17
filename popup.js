@@ -97,7 +97,7 @@ function buildShell() {
     el("div", { style: "height:1px;background:var(--line);margin:5px 3px;" }),
     el("button", { class: "btn", style: miStyle, text: "エクスポート（JSON）", onclick: async () => { await exportJson(); menu.classList.remove("open"); } }),
     el("button", { class: "btn", style: miStyle, text: "インポート（JSON）", onclick: () => fileInput.click() }),
-    el("button", { class: "btn", style: miStyle, text: "全アイテムを再取得（Shopify）", onclick: async () => { menu.classList.remove("open"); await refetchAllShopify(); } }),
+    el("button", { class: "btn", style: miStyle, text: "すべて更新（価格・在庫・実寸）", onclick: async () => { menu.classList.remove("open"); await updateAll(); } }),
     el("button", { class: "btn", style: miStyle, text: "サイズ基準を再登録（UNIQLO）", onclick: async () => { menu.classList.remove("open"); await reseedBase(); } }),
     el("div", { style: "height:1px;background:var(--line);margin:5px 3px;" }),
     el("button", { class: "btn", style: miStyle + "color:var(--accent);", text: "すべて削除", onclick: async () => { if (confirm("すべてのアイテムを削除します（サイズ基準のUNIQLOも消えます）。よろしいですか？\n※ 基準は⋯メニュー「サイズ基準を再登録」で戻せます。")) { await setItems([]); } menu.classList.remove("open"); } }),
@@ -861,29 +861,36 @@ async function afterCapture(id, cur) {
   if (fresh) openEdit(fresh);
 }
 
-// Server-side extract proxy: name/price/image/category/sizes + 実寸.
-async function captureViaWorker(url, fallbackName) {
+// GET the extract-proxy (worker) for a URL; returns parsed item data or null.
+async function workerFetch(url) {
+  if (!workerUrl) return null;
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), 12000);
     const r = await fetch(workerUrl.replace(/\/$/, "") + "/?url=" + encodeURIComponent(url), { signal: ctl.signal }).finally(() => clearTimeout(t));
-    if (!r.ok) return false;
+    if (!r.ok) return null;
     const d = await r.json();
-    if (!d || d.error || !(d.name || d.image || d.price)) return false;
-    let host = ""; try { host = new URL(url).hostname.replace(/^www\./, ""); } catch { /* noop */ }
-    const cur = d.currency || guessCurrencyByTld(host);
-    const g = (d.major || d.sub) ? { major: d.major || "", sub: d.sub || "" } : guessCategory([d.name, fallbackName].join(" "));
-    const { id } = await addItem({
-      url, domain: host, site: d.site || siteNameFromDomain(host),
-      name: d.name || fallbackName || "", brand: d.brand || "", price: d.price || "",
-      currency: cur, image: d.image || "", availability: d.availability || "",
-      sizes: d.sizes || "", colors: d.colors || "", color: d.color || "",
-      measuresBySize: (d.measuresBySize && typeof d.measuresBySize === "object") ? d.measuresBySize : {},
-      major: g.major, sub: g.sub,
-    });
-    await afterCapture(id, cur);
-    return true;
-  } catch { return false; }
+    return (d && !d.error && (d.name || d.image || d.price)) ? d : null;
+  } catch { return null; }
+}
+
+// Server-side extract proxy: name/price/image/category/sizes + 実寸.
+async function captureViaWorker(url, fallbackName) {
+  const d = await workerFetch(url);
+  if (!d) return false;
+  let host = ""; try { host = new URL(url).hostname.replace(/^www\./, ""); } catch { /* noop */ }
+  const cur = d.currency || guessCurrencyByTld(host);
+  const g = (d.major || d.sub) ? { major: d.major || "", sub: d.sub || "" } : guessCategory([d.name, fallbackName].join(" "));
+  const { id } = await addItem({
+    url, domain: host, site: d.site || siteNameFromDomain(host),
+    name: d.name || fallbackName || "", brand: d.brand || "", price: d.price || "",
+    currency: cur, image: d.image || "", availability: d.availability || "",
+    sizes: d.sizes || "", colors: d.colors || "", color: d.color || "",
+    measuresBySize: (d.measuresBySize && typeof d.measuresBySize === "object") ? d.measuresBySize : {},
+    major: g.major, sub: g.sub,
+  });
+  await afterCapture(id, cur);
+  return true;
 }
 
 // Shopify without a worker: the CORS-open <product>.js is enough (no 実寸).
@@ -947,24 +954,51 @@ function openWebAdd(prefill = {}) {
 
 // Re-fetch all Shopify items from their .js (heals existing items after a fix,
 // e.g. corrected price / newly-supported fields). Non-Shopify items are skipped.
-async function refetchAllShopify() {
-  const its = await getItems();
-  let ok = 0, skip = 0;
-  for (const it of its) {
-    const jsUrl = shopifyProductJsonUrl(it.url);
-    if (!jsUrl) { skip++; continue; }
+// Fetch fresh data for a URL: the worker (any site, incl 実寸) if configured,
+// else Shopify's CORS-open .js. Returns a partial item (extracted fields) or null.
+async function fetchItemData(url, fallbackName) {
+  url = (url || "").trim();
+  const d = await workerFetch(url); // worker handles Shopify + non-Shopify, and returns 実寸
+  if (d) { if (!d.currency) d.currency = guessCurrencyByTld(d.domain || ""); return d; }
+  const jsUrl = shopifyProductJsonUrl(url);
+  if (jsUrl) {
     try {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), 8000);
       const r = await fetch(jsUrl, { credentials: "omit", signal: ctl.signal }).finally(() => clearTimeout(t));
-      if (!r.ok) { skip++; continue; }
-      const s = shopifyFromJson(await r.json(), { currency: it.currency || guessCurrencyByTld(it.domain), href: it.url });
-      const patch = {};
-      for (const k of ["price", "image", "name", "brand", "availability", "sizes", "colors"]) if (s && s[k]) patch[k] = s[k];
-      if (Object.keys(patch).length) { await patchItem(it.id, patch); ok++; } else skip++;
-    } catch { skip++; }
+      if (r.ok) {
+        const s = shopifyFromJson(await r.json(), { currency: "", href: url });
+        if (s) { const g = guessCategory([s.name, fallbackName].join(" ")); return { ...s, major: g.major, sub: g.sub }; }
+      }
+    } catch { /* noop */ }
   }
-  alert(`再取得しました：${ok} 件更新 / ${skip} 件は対象外（Shopify以外など）`);
+  return null;
+}
+
+// One-tap bulk update: re-fetch every item and refresh price/stock/image/sizes
+// AND 実寸 (measuresBySize) — also backfills size data into items saved before
+// 実寸 extraction existed, so the user never has to re-add or touch the shop site.
+async function updateAll() {
+  const targets = (await getItems()).filter((it) => it.url);
+  if (!targets.length) { alert("更新できるアイテムがありません。"); return; }
+  if (!confirm(`${targets.length} 件を一括更新します。\n価格・在庫・画像・サイズ・実寸を取り直します（メモ・状態・カテゴリ・選択サイズはそのまま）。`)) return;
+  let ok = 0, meas = 0, skip = 0, done = 0;
+  toast(`一括更新中… 0/${targets.length}`);
+  for (const it of targets) {
+    try {
+      const d = await fetchItemData(it.url, it.name);
+      if (d) {
+        const patch = {};
+        for (const k of ["price", "image", "name", "brand", "availability", "sizes", "colors", "color"]) if (d[k]) patch[k] = d[k];
+        if (d.measuresBySize && Object.keys(d.measuresBySize).length) { patch.measuresBySize = d.measuresBySize; meas++; }
+        if (!it.major && d.major) { patch.major = d.major; patch.sub = d.sub || ""; } // backfill category only if未分類
+        if (Object.keys(patch).length) { await patchItem(it.id, patch); ok++; } else skip++;
+      } else skip++;
+    } catch { skip++; }
+    done++;
+    if (done % 3 === 0 || done === targets.length) toast(`一括更新中… ${done}/${targets.length}`);
+  }
+  alert(`一括更新 完了\n${ok} 件を更新（うち実寸 ${meas} 件）/ ${skip} 件は取得できず。\n※ 取得できないサイトは、アイテムの ✎ から実寸を手入力できます。`);
 }
 
 // Re-add the UNIQLO size base (after an accidental "すべて削除").
