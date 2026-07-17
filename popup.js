@@ -3,10 +3,10 @@ import {
   getItems, setItems, addItem, fmtPrice, faviconUrl, curSymbol,
   siteNameFromDomain, domainFromUrl, uid, normUrl, patchItem,
   toExport, itemsFromParsed, mergeImport,
-  getOutfits, setOutfits, newOutfit, toggleOutfitItem, outfitTotal, pruneItemFromOutfits,
+  getOutfits, setOutfits, newOutfit, toggleOutfitItem, pruneItemFromOutfits,
   migrateItemCategory,
   getCategories, setCategories, defaultCategories, majorsOf, subsOf,
-  getBases, setBases, pruneBaseItem, measureFieldsFor, toCm, diffVsBase, parseMeasures,
+  getBases, setBases, baseKey, pruneBaseItem, measureFieldsFor, toCm, diffVsBase, parseMeasures,
   ensureSeeded, sourceKind, effectiveSource, SEED_BASE,
   getFx, setFx, defaultFx, toJPY, currencyCode,
   getWorker, setWorker,
@@ -14,7 +14,7 @@ import {
 import { extractProduct, DOMAIN_RULES, shopifyProductJsonUrl, shopifyFromJson, guessCategory } from "./extract.js";
 
 const STATUSES = ["欲しい", "検討中", "購入済み"];
-const CURRENCIES = ["¥", "$", "€", "£"];
+const CURRENCIES = ["JPY", "USD", "EUR", "GBP", "CNY", "KRW"]; // stored as codes (¥ can't distinguish JPY/CNY)
 const AVAILABILITIES = [
   { v: "", label: "—（不明）" },
   { v: "instock", label: "在庫あり" },
@@ -124,7 +124,7 @@ function buildShell() {
     style: "border:none;border-radius:999px;padding:5px 13px;font-size:12px;cursor:pointer;background:transparent;color:var(--stone);",
     text: label, onclick: () => { viewMode = mode; update(); },
   });
-  toggle.append(mkTab("items", "アイテム"), mkTab("outfits", "コーデ"));
+  toggle.append(mkTab("items", "アイテム"), mkTab("bases", "基準"), mkTab("outfits", "コーデ"));
   refs.toggle = toggle;
 
   // filters
@@ -165,6 +165,7 @@ function matchesBase(i) {
 
 function visibleItems() {
   let list = items.filter((i) => {
+    if (isBase(i)) return false; // size bases live in their own tab, not the wishlist
     if (!matchesBase(i)) return false;
     if (fMajor !== "すべて" && (i.major || "") !== fMajor) return false;
     if (fSub !== "すべて" && (i.sub || "") !== fSub) return false;
@@ -180,7 +181,7 @@ function visibleItems() {
 
 function renderChips() {
   refs.chips.innerHTML = "";
-  const sites = ["すべて", ...Array.from(new Set(items.map((i) => i.site).filter(Boolean)))];
+  const sites = ["すべて", ...Array.from(new Set(items.filter((i) => !isBase(i)).map((i) => i.site).filter(Boolean)))];
   sites.forEach((s) => refs.chips.append(chip(s, fSite === s, () => { fSite = s; update(); })));
   refs.chips.append(el("span", { class: "sep" }));
   ["すべて", ...STATUSES].forEach((s) => refs.chips.append(chip(s, fStatus === s, () => { fStatus = s; update(); }, s === "欲しい")));
@@ -201,7 +202,7 @@ function catTab(label, count, on, onClick) {
 }
 
 function renderCategoryTabs() {
-  const base = items.filter(matchesBase);
+  const base = items.filter((i) => !isBase(i) && matchesBase(i));
   const majorCount = (m) => base.filter((i) => (i.major || "") === m).length;
 
   refs.majorTabs.innerHTML = "";
@@ -272,15 +273,21 @@ function thumbInner(it, onImgFail) {
 }
 
 // ---- base garment & fit comparison helpers (軸b size) ----
-function isBase(it) { return it.major && bases[it.major] === it.id; }
-function baseItemFor(major) { const id = bases[major]; return id ? items.find((i) => i.id === id) : null; }
+// Bases are keyed per category (major/sub) so each of Tシャツ/ジャケット/コート/パンツ…
+// has its own reference garment; an item compares only against its own category's base.
+function isBase(it) { return !!it.major && bases[baseKey(it.major, it.sub)] === it.id; }
+function baseItemFor(it) { const id = it && it.major ? bases[baseKey(it.major, it.sub)] : null; return id ? items.find((i) => i.id === id) : null; }
 async function toggleBase(it) {
   if (!it.major) { alert("先に大カテゴリを設定してください（編集から）。"); return; }
   if (!measureFieldsFor(it.major).length) { alert(`「${it.major}」は実寸比較の対象外です。`); return; }
+  const k = baseKey(it.major, it.sub);
   const next = { ...bases };
-  if (next[it.major] === it.id) delete next[it.major]; else next[it.major] = it.id;
+  if (next[k] === it.id) { delete next[k]; toast("基準を解除しました"); }
+  else { next[k] = it.id; toast(`「${[it.major, it.sub].filter(Boolean).join(" / ")}」の基準にしました（「基準」タブへ）`); }
   bases = next; await setBases(bases); // storage change -> reload
 }
+// Human label for a base key ("トップス/Tシャツ" -> "トップス / Tシャツ").
+function baseKeyLabel(k) { return String(k || "").split("/").filter(Boolean).join(" / "); }
 
 // The measurements in effect for an item: the picked size's row from an
 // auto-extracted size table, else manual measures, else the largest table row.
@@ -299,7 +306,7 @@ function measuresLine(it) {
   const em = effectiveMeasures(it);
   const fields = measureFieldsFor(it.major).filter((f) => em[f]);
   if (!fields.length) return null;
-  const b = baseItemFor(it.major);
+  const b = baseItemFor(it);
   const useDiff = b && b.id !== it.id;
   const d = useDiff ? diffVsBase(em, effectiveMeasures(b)) : {};
   const wrap = el("div", { style: "display:flex;flex-wrap:wrap;gap:3px 9px;margin-top:5px;font-size:11.5px;font-variant-numeric:tabular-nums;" });
@@ -330,6 +337,22 @@ function sizePicker(it) {
   return sel;
 }
 
+// When a size base is set for this major but the item has no 実寸 captured
+// (e.g. an opaque numeric size on a site with no size chart), offer a quick way
+// to add it manually so the ±comparison can work.
+function measuresHint(it) {
+  if (!it.major || !measureFieldsFor(it.major).length) return null;
+  const b = baseItemFor(it);
+  if (!b || b.id === it.id) return null; // only when there's a base to compare against
+  const em = effectiveMeasures(it);
+  if (measureFieldsFor(it.major).some((f) => em[f])) return null; // already has measures
+  return el("button", {
+    style: "margin-top:5px;font-size:11px;color:var(--accent);background:none;border:none;padding:0;cursor:pointer;text-align:left;",
+    text: "＋ 実寸を追加して比較",
+    onclick: () => openEdit(it),
+  });
+}
+
 function card(it) {
   const want = it.status === "欲しい", bought = it.status === "購入済み";
   const thumb = el("div", { class: "thumb", style: "position:relative;" });
@@ -340,7 +363,7 @@ function card(it) {
     el("button", { class: "iconbtn", title: isBase(it) ? "基準を解除" : "この服を基準にする", text: "📏", onclick: () => toggleBase(it) }),
     el("button", { class: "iconbtn", title: "コーデに追加", text: "＋", onclick: () => openOutfitPicker(it) }),
     el("button", { class: "iconbtn", title: "編集", text: "✎", onclick: () => openEdit(it) }),
-    el("button", { class: "iconbtn", title: "削除", text: "🗑", onclick: () => removeItem(it.id) }),
+    el("button", { class: "iconbtn", title: "削除", text: "🗑", onclick: () => { if (confirm("このアイテムを削除しますか？" + (isBase(it) ? "\n（サイズ基準も解除されます）" : ""))) removeItem(it.id); } }),
   ]));
   // top-left stack of state badges (kept clear of the heart TR and acts bottom)
   const tl = el("div", { style: "position:absolute;top:8px;left:8px;z-index:3;display:flex;flex-direction:column;gap:4px;align-items:flex-start;max-width:calc(100% - 46px);" });
@@ -358,6 +381,7 @@ function card(it) {
     it.sizes ? el("div", { style: "font-size:12px;color:var(--stone);margin-top:2px;", text: `サイズ ${it.sizes}` }) : null,
     sizePicker(it),
     measuresLine(it),
+    measuresHint(it),
     it.note ? el("div", { class: "note", text: it.note }) : null,
     el("div", { class: "foot" }, [
       priceEl(it, bought),
@@ -372,7 +396,7 @@ function card(it) {
 
 function renderGrid() {
   refs.scroll.innerHTML = "";
-  if (items.length === 0) {
+  if (!items.some((i) => !isBase(i))) { // no non-base items yet
     refs.scroll.append(el("div", { class: "empty" }, [
       el("div", { class: "t serif", text: "まだ何も掛かっていません" }),
       el("div", { text: window.__EDIT_WEB__
@@ -450,7 +474,10 @@ function itemById(id) { return items.find((i) => i.id === id) || null; }
 
 function outfitCard(o) {
   const members = o.itemIds.map(itemById).filter(Boolean);
-  const total = outfitTotal(o.itemIds, items);
+  // Sum in yen via the FX table — members can be in different currencies.
+  const totalJpy = members.reduce((s, it) => s + (toJPY(it.price, it.currency, fx) || 0), 0);
+  const anyForeign = members.some((it) => it.price && currencyCode(it.currency) !== "JPY");
+  const anyUnknown = members.some((it) => it.price && toJPY(it.price, it.currency, fx) == null);
 
   const thumbs = el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;margin:8px 0;" });
   if (members.length === 0) {
@@ -480,7 +507,7 @@ function outfitCard(o) {
     thumbs,
     el("div", { style: "display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);padding-top:8px;" }, [
       el("span", { style: "font-size:12px;color:var(--stone);", text: `${members.length} 点` }),
-      el("span", { class: "price serif", text: fmtPrice(String(total), "¥") }),
+      el("span", { class: "price serif", title: anyForeign ? "為替換算した合計（円）" : "", text: (anyForeign ? "≈" : "") + fmtPrice(String(totalJpy), "JPY") + (anyUnknown ? " +未換算" : "") }),
     ]),
   ]);
 }
@@ -565,6 +592,51 @@ function openOutfitPicker(it) {
   overlay._refresh = renderList;
 }
 
+/* ---------- bases view (サイズ基準・カテゴリ別) ---------- */
+function renderBasesMeta() {
+  const n = Object.keys(bases).filter((k) => items.some((i) => i.id === bases[k])).length;
+  refs.meta.innerHTML = "";
+  refs.meta.append(el("span", { text: `${n} 件の基準` }));
+}
+function baseCard(it, key) {
+  const thumb = el("div", { class: "thumb", style: "position:relative;" });
+  thumb.append(thumbInner(it));
+  thumb.append(el("div", { style: "position:absolute;top:8px;left:8px;z-index:3;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:#3E5A57;color:#fff;", text: "基準" }));
+  const body = el("div", { class: "body" }, [
+    el("div", { style: "font-size:11px;font-weight:600;color:#3E5A57;margin-bottom:2px;", text: (baseKeyLabel(key) || "未分類") + " の基準" }),
+    it.brand ? el("div", { class: "brand-l", text: it.brand }) : null,
+    el("a", { class: "name", href: it.url || "#", target: "_blank", rel: "noreferrer", text: it.name || "（名称なし）" }),
+    it.sizes ? el("div", { style: "font-size:12px;color:var(--stone);margin-top:2px;", text: `サイズ ${it.sizes}` }) : null,
+    sizePicker(it),
+    measuresLine(it), // its own 実寸 (no ±, since it is the base)
+    el("div", { class: "foot", style: "display:flex;gap:8px;align-items:center;" }, [
+      el("button", { class: "iconbtn", title: "編集", text: "✎", onclick: () => openEdit(it) }),
+      el("button", { class: "btn btn-ghost", style: "font-size:12px;color:var(--accent);", text: "基準を解除", onclick: async () => { const next = { ...bases }; delete next[key]; bases = next; toast("基準を解除しました"); await setBases(bases); } }),
+    ]),
+  ]);
+  return el("div", { class: "card" }, [thumb, body]);
+}
+function renderBases() {
+  refs.scroll.innerHTML = "";
+  refs.scroll.append(el("div", { style: "font-size:12.5px;color:var(--stone);line-height:1.7;margin:2px 2px 12px;" }, [
+    "サイズの基準にする服です。", el("b", { text: "Tシャツ・ジャケット・コート・パンツなどカテゴリごとに1つずつ" }),
+    "設定でき、同じカテゴリのアイテムの実寸がこの基準と ±cm で比較されます。", el("br"),
+    "基準にするには、アイテムのカードで 📏 を押します。",
+  ]));
+  const entries = Object.keys(bases).map((k) => ({ key: k, it: items.find((i) => i.id === bases[k]) })).filter((e) => e.it);
+  entries.sort((a, b) => baseKeyLabel(a.key).localeCompare(baseKeyLabel(b.key), "ja"));
+  if (!entries.length) {
+    refs.scroll.append(el("div", { class: "empty" }, [
+      el("div", { class: "t serif", text: "基準は未設定です" }),
+      el("div", { text: "アイテムのカードで 📏 を押すと、そのカテゴリ（Tシャツ / ジャケット / パンツ…）の基準になります。", style: "max-width:440px;margin:0 auto;line-height:1.7;font-size:13px;" }),
+    ]));
+    return;
+  }
+  const g = el("div", { class: "grid" });
+  entries.forEach(({ key, it }) => g.append(baseCard(it, key)));
+  refs.scroll.append(g);
+}
+
 /* ---------- update ---------- */
 function update() {
   // toggle active styling
@@ -577,14 +649,21 @@ function update() {
     });
   }
   const isOutfits = viewMode === "outfits";
-  if (refs.sortSel) refs.sortSel.style.display = isOutfits ? "none" : "";
-  if (refs.majorTabs) refs.majorTabs.style.display = isOutfits ? "none" : "flex";
-  if (isOutfits && refs.subTabs) refs.subTabs.style.display = "none";
+  const isBasesView = viewMode === "bases";
+  const special = isOutfits || isBasesView;
+  if (refs.sortSel) refs.sortSel.style.display = special ? "none" : "";
+  if (refs.majorTabs) refs.majorTabs.style.display = special ? "none" : "flex";
+  if (special && refs.subTabs) refs.subTabs.style.display = "none";
 
   if (isOutfits) {
     refs.chips.innerHTML = "";
     renderOutfitMeta();
     renderOutfits();
+    refs.bar.innerHTML = "";
+  } else if (isBasesView) {
+    refs.chips.innerHTML = "";
+    renderBasesMeta();
+    renderBases();
     refs.bar.innerHTML = "";
   } else {
     renderChips();
@@ -611,6 +690,15 @@ async function reload() {
   outfits = await getOutfits();
   cats = await getCategories();
   bases = await getBases();
+  // migrate legacy major-only base keys ("トップス") -> "major/sub" ("トップス/Tシャツ")
+  let basesChanged = false;
+  for (const k of Object.keys(bases)) {
+    if (k.includes("/")) continue;
+    const it = items.find((i) => i.id === bases[k]);
+    const nk = baseKey(k, it ? it.sub : "");
+    if (nk && nk !== k) { if (!(nk in bases)) bases[nk] = bases[k]; delete bases[k]; basesChanged = true; }
+  }
+  if (basesChanged) await setBases(bases);
   fx = await getFx();
   workerUrl = await getWorker();
   // persist one-time category migration (idempotent on subsequent loads)
@@ -650,7 +738,7 @@ async function recheck(it, btn) {
     const jsUrl = shopifyProductJsonUrl(it.url);
     if (jsUrl) {
       try {
-        const r = await fetch(jsUrl, { credentials: "omit" });
+        const r = await fetch(jsUrl, { credentials: "omit", signal: AbortSignal.timeout(8000) });
         if (r.ok) {
           const s = shopifyFromJson(await r.json(), { currency: it.currency, href: it.url });
           if (s) for (const k of ["price", "availability", "image", "name", "brand", "sizes"]) if (s[k]) patch[k] = s[k];
@@ -659,7 +747,7 @@ async function recheck(it, btn) {
     }
     // Generic fallback (static HTML) when Shopify didn't yield fields
     if (!patch.image || !patch.price) {
-      const res = await fetch(it.url, { credentials: "omit" });
+      const res = await fetch(it.url, { credentials: "omit", signal: AbortSignal.timeout(10000) });
       if (!res.ok) throw new Error("HTTP " + res.status);
       const doc = new DOMParser().parseFromString(await res.text(), "text/html");
       const loc = { href: it.url, hostname: new URL(it.url).hostname };
@@ -746,58 +834,80 @@ function guessCurrencyByTld(host) {
   return ""; // unknown (e.g. .com) — user picks; item opens for review
 }
 
-// Capture from a URL on the web/PWA. Shopify product URLs auto-fill from the
-// CORS-open <product>.js; anything else falls back to the manual add modal.
+// Capture from a URL on the web/PWA. When an extract-proxy (worker) is set it is
+// preferred — it fills name/price/image/category/sizes AND 実寸 (measuresBySize),
+// and handles non-Shopify sites. Without a worker, Shopify still self-serves via
+// its CORS-open <product>.js. Anything else falls back to the manual add modal.
 async function webCaptureUrl(url, fallbackName) {
   url = (url || "").trim();
-  const jsUrl = shopifyProductJsonUrl(url);
-  if (jsUrl) {
-    try {
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), 8000); // never hang on a slow/bad host
-      const r = await fetch(jsUrl, { credentials: "omit", signal: ctl.signal }).finally(() => clearTimeout(t));
-      if (r.ok) {
-        const host = new URL(url).hostname;
-        const domain = host.replace(/^www\./, "");
-        const cur = guessCurrencyByTld(host);
-        const s = shopifyFromJson(await r.json(), { currency: cur, href: url });
-        if (s) {
-          const g = guessCategory([s.name, fallbackName].join(" "));
-          await addItem({
-            url, domain, site: siteNameFromDomain(domain),
-            name: s.name || fallbackName || "", brand: s.brand, price: s.price,
-            currency: cur, image: s.image, availability: s.availability,
-            sizes: s.sizes, colors: s.colors, major: g.major, sub: g.sub,
-          });
-          const fresh = (await getItems())[0];
-          if (!cur) { toast("追加しました（通貨を選んでください）"); if (fresh) openEdit(fresh); }
-          else { toast("♥ 自動で追加しました"); }
-          return true;
-        }
-      }
-    } catch { /* fall through to manual */ }
-  }
-  // non-Shopify: use the extract proxy (Cloudflare Worker) if configured
-  if (workerUrl) {
-    try {
-      const ctl = new AbortController();
-      const t = setTimeout(() => ctl.abort(), 12000);
-      const r = await fetch(workerUrl.replace(/\/$/, "") + "/?url=" + encodeURIComponent(url), { signal: ctl.signal }).finally(() => clearTimeout(t));
-      if (r.ok) {
-        const d = await r.json();
-        if (d && !d.error && (d.name || d.image || d.price)) {
-          let host = ""; try { host = new URL(url).hostname.replace(/^www\./, ""); } catch { /* noop */ }
-          const cur = d.currency || guessCurrencyByTld(host);
-          const g = (d.major || d.sub) ? { major: d.major || "", sub: d.sub || "" } : guessCategory([d.name, fallbackName].join(" "));
-          await addItem({ url, domain: host, site: d.site || siteNameFromDomain(host), name: d.name || fallbackName || "", brand: d.brand || "", price: d.price || "", currency: cur, image: d.image || "", availability: d.availability || "", sizes: d.sizes || "", colors: d.colors || "", color: d.color || "", major: g.major, sub: g.sub });
-          toast("♥ 自動で追加しました");
-          return true;
-        }
-      }
-    } catch { /* fall through to manual */ }
-  }
+  if (await tryAutoCapture(url, fallbackName)) return true;
   openWebAdd({ url, name: fallbackName || "" }); // no proxy / failed: manual
   return false;
+}
+
+// Attempt auto-capture without the manual-modal fallback. Returns true on success.
+async function tryAutoCapture(url, fallbackName) {
+  if (workerUrl && await captureViaWorker(url, fallbackName)) return true;
+  if (shopifyProductJsonUrl(url) && await captureShopifyClientSide(url, fallbackName)) return true;
+  return false;
+}
+
+// After an add/update, open the just-saved item by its id — NOT items[0], which
+// only holds the newest item; addItem updates an existing URL in place.
+async function afterCapture(id, cur) {
+  if (cur) { toast("♥ 自動で追加しました"); return; }
+  toast("追加しました（通貨を選んでください）");
+  const fresh = (await getItems()).find((i) => i.id === id);
+  if (fresh) openEdit(fresh);
+}
+
+// Server-side extract proxy: name/price/image/category/sizes + 実寸.
+async function captureViaWorker(url, fallbackName) {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 12000);
+    const r = await fetch(workerUrl.replace(/\/$/, "") + "/?url=" + encodeURIComponent(url), { signal: ctl.signal }).finally(() => clearTimeout(t));
+    if (!r.ok) return false;
+    const d = await r.json();
+    if (!d || d.error || !(d.name || d.image || d.price)) return false;
+    let host = ""; try { host = new URL(url).hostname.replace(/^www\./, ""); } catch { /* noop */ }
+    const cur = d.currency || guessCurrencyByTld(host);
+    const g = (d.major || d.sub) ? { major: d.major || "", sub: d.sub || "" } : guessCategory([d.name, fallbackName].join(" "));
+    const { id } = await addItem({
+      url, domain: host, site: d.site || siteNameFromDomain(host),
+      name: d.name || fallbackName || "", brand: d.brand || "", price: d.price || "",
+      currency: cur, image: d.image || "", availability: d.availability || "",
+      sizes: d.sizes || "", colors: d.colors || "", color: d.color || "",
+      measuresBySize: (d.measuresBySize && typeof d.measuresBySize === "object") ? d.measuresBySize : {},
+      major: g.major, sub: g.sub,
+    });
+    await afterCapture(id, cur);
+    return true;
+  } catch { return false; }
+}
+
+// Shopify without a worker: the CORS-open <product>.js is enough (no 実寸).
+async function captureShopifyClientSide(url, fallbackName) {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 8000); // never hang on a slow/bad host
+    const r = await fetch(shopifyProductJsonUrl(url), { credentials: "omit", signal: ctl.signal }).finally(() => clearTimeout(t));
+    if (!r.ok) return false;
+    const host = new URL(url).hostname;
+    const domain = host.replace(/^www\./, "");
+    const cur = guessCurrencyByTld(host);
+    const s = shopifyFromJson(await r.json(), { currency: cur, href: url });
+    if (!s) return false;
+    const g = guessCategory([s.name, fallbackName].join(" "));
+    const { id } = await addItem({
+      url, domain, site: siteNameFromDomain(domain),
+      name: s.name || fallbackName || "", brand: s.brand, price: s.price,
+      currency: cur, image: s.image, availability: s.availability,
+      sizes: s.sizes, colors: s.colors, major: g.major, sub: g.sub,
+    });
+    await afterCapture(id, cur);
+    return true;
+  } catch { return false; }
 }
 
 // Web/PWA manual add — a closeable modal (no blocking prompt, no orphan item).
@@ -822,14 +932,13 @@ function openWebAdd(prefill = {}) {
         const url = (urlI.value || "").trim(), name = (nameI.value || "").trim();
         if (!url && !name) { overlay.remove(); return; }
         overlay.remove();
-        if (shopifyProductJsonUrl(url)) {
-          await webCaptureUrl(url, name); // Shopify: auto-fill
-        } else {
-          const domain = domainFromUrl(url); // non-Shopify: store + open edit for the rest
-          await addItem({ url, domain, site: domain ? siteNameFromDomain(domain) : "", name });
-          const fresh = (await getItems())[0];
-          if (fresh) openEdit(fresh);
-        }
+        // Auto-capture (worker for any site, or Shopify .js). If it can't, store a
+        // bare item and open the editor so the user can fill in the rest.
+        if (await tryAutoCapture(url, name)) return;
+        const domain = domainFromUrl(url);
+        const { id } = await addItem({ url, domain, site: domain ? siteNameFromDomain(domain) : "", name });
+        const fresh = (await getItems()).find((i) => i.id === id);
+        if (fresh) openEdit(fresh);
       } }),
     ]),
   ]);
@@ -864,7 +973,7 @@ async function reseedBase() {
   const added = (await getItems()).find((i) => i.url === SEED_BASE.url);
   if (added && added.major) {
     const b = await getBases();
-    b[added.major] = added.id;
+    b[baseKey(added.major, added.sub)] = added.id;
     await setBases(b);
   }
   alert("UNIQLO エアリズムコットンT 2XL をサイズ基準として再登録しました。");
@@ -911,8 +1020,9 @@ function openEdit(it) {
   const brandI = inp(f.brand, (v) => f.brand = v);
   const siteI = inp(f.site, (v) => f.site = v);
   const priceI = inp(f.price, (v) => f.price = v.replace(/[^\d.]/g, ""), { inputmode: "numeric" });
-  const curSel = el("select", { onchange: (e) => f.currency = e.target.value, style: "width:62px;flex:0 0 auto;" }, CURRENCIES.map((c) => el("option", { value: c, text: c })));
-  curSel.value = curSymbol(f.currency) || "¥"; f.currency = curSel.value;
+  const curSel = el("select", { onchange: (e) => f.currency = e.target.value, style: "width:82px;flex:0 0 auto;" }, CURRENCIES.map((c) => el("option", { value: c, text: curSymbol(c) + " " + c })));
+  f.currency = currencyCode(f.currency); // normalize symbol/blank -> code (never drops KRW/CNY)
+  curSel.value = f.currency;
   const subSel = el("select", {});
   const fillSubs = () => {
     subSel.innerHTML = "";

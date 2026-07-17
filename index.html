@@ -23,8 +23,13 @@
     // redeploys reach the phone without manual cache-clearing.
     if ("serviceWorker" in navigator) {
       let reloaded = false;
+      // Only auto-reload on a GENUINE update. On first install the SW's clients.claim()
+      // also fires controllerchange; reloading then can abort an in-flight
+      // "Share → EDIT" capture (its URL was already stripped). So skip when there
+      // was no controller at load time.
+      const hadController = !!navigator.serviceWorker.controller;
       navigator.serviceWorker.addEventListener("controllerchange", () => {
-        if (reloaded) return; reloaded = true; location.reload();
+        if (reloaded || !hadController) return; reloaded = true; location.reload();
       });
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("sw.js").then((reg) => {

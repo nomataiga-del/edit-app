@@ -6,11 +6,19 @@ export function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
+// Tracking/referrer params that don't identify the product — dropped so the
+// same item shared with e.g. ?igshid=… (common from mobile) dedupes correctly.
+const TRACKING_PARAM = /^(utm_|mc_)/i;
+const TRACKING_KEYS = new Set(["fbclid", "gclid", "yclid", "dclid", "_gl", "igshid", "spm", "ref_src", "ref_", "cmpid"]);
 export function normUrl(u) {
   if (!u) return "";
   try {
     const x = new URL(u);
     x.hash = "";
+    const drop = [];
+    x.searchParams.forEach((_, k) => { if (TRACKING_PARAM.test(k) || TRACKING_KEYS.has(k.toLowerCase())) drop.push(k); });
+    drop.forEach((k) => x.searchParams.delete(k));
+    if (x.pathname.length > 1) x.pathname = x.pathname.replace(/\/+$/, ""); // trailing slash (keep root "/")
     return x.toString();
   } catch {
     return u;
@@ -218,8 +226,11 @@ export function toCm(input) {
   return Math.round(cm * 10) / 10;
 }
 
-// Base garment is a reference to an existing item, per major category.
-export const KEY_BASES = "edit_bases_v1"; // { [major]: itemId }
+// Base garment is a reference to an existing item, per category (大/中).
+// Key is `major/sub` so e.g. Tシャツ・ジャケット・コート each have their own
+// baseline (all use the same トップス measure fields, but different reference garments).
+export const KEY_BASES = "edit_bases_v1"; // { "major/sub": itemId }
+export function baseKey(major, sub) { return major ? major + "/" + (sub || "") : ""; }
 export async function getBases() {
   const r = await chrome.storage.local.get(KEY_BASES);
   return r[KEY_BASES] && typeof r[KEY_BASES] === "object" ? r[KEY_BASES] : {};
@@ -301,7 +312,7 @@ export async function ensureSeeded() {
   const existing = await getItems();
   if (existing.length) return false;
   const item = { id: uid(), _ts: Date.now(), ...SEED_BASE };
-  await chrome.storage.local.set({ [KEY]: [item], [KEY_BASES]: { [item.major]: item.id } });
+  await chrome.storage.local.set({ [KEY]: [item], [KEY_BASES]: { [baseKey(item.major, item.sub)]: item.id } });
   return true;
 }
 
@@ -329,9 +340,9 @@ export async function addItem(data) {
     merged._ts = Date.now();
     items[idx] = merged;
     await setItems(items);
-    return { status: "updated" };
+    return { status: "updated", id: merged.id };
   }
-  items.unshift({
+  const item = {
     id: uid(),
     _ts: Date.now(),
     status: "欲しい",
@@ -347,9 +358,10 @@ export async function addItem(data) {
     source: "",
     tags: "",
     ...data,
-  });
+  };
+  items.unshift(item);
   await setItems(items);
-  return { status: "added" };
+  return { status: "added", id: item.id };
 }
 
 /* ---------------- export / import (JSON) ---------------- */
