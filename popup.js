@@ -87,7 +87,7 @@ function buildShell() {
     fileInput.value = ""; // allow re-importing the same file
     menu.classList.remove("open");
   });
-  const menuPanel = el("div", { style: "display:none;position:absolute;right:0;top:38px;background:var(--card);border:1px solid var(--line);border-radius:11px;padding:6px;width:190px;box-shadow:0 16px 40px -20px rgba(0,0,0,.4);z-index:40;" }, [
+  const menuPanel = el("div", { style: "display:none;position:absolute;right:0;top:38px;background:var(--card);border:1px solid var(--line);border-radius:11px;padding:6px;width:190px;max-height:min(72vh,480px);overflow-y:auto;-webkit-overflow-scrolling:touch;box-shadow:0 16px 40px -20px rgba(0,0,0,.4);z-index:40;" }, [
     (!window.__EDIT_WEB__ && chrome.runtime && chrome.runtime.getURL) ? el("button", { class: "btn", style: miStyle, text: "タブで開く（全画面）", onclick: () => { chrome.tabs.create({ url: chrome.runtime.getURL("popup.html?tab=1") }); if (window.close) window.close(); } }) : null,
     !window.__EDIT_WEB__ ? el("button", { class: "btn", style: miStyle, text: "右下ボタンの表示／非表示", onclick: async () => { const r = await chrome.storage.local.get("edit_hidebtn_v1"); const next = !(r && r.edit_hidebtn_v1); await chrome.storage.local.set({ edit_hidebtn_v1: next }); menu.classList.remove("open"); alert(next ? "右下の追加ボタンを非表示にしました（各ページは再読み込みで反映。右クリック「EDITに追加」は使えます）" : "右下の追加ボタンを表示にしました（再読み込みで反映）"); } }) : null,
     el("button", { class: "btn", style: miStyle, text: "カテゴリ設定", onclick: () => { menu.classList.remove("open"); openCategorySettings(); } }),
@@ -100,7 +100,7 @@ function buildShell() {
     el("button", { class: "btn", style: miStyle, text: "すべて更新（価格・在庫・実寸）", onclick: async () => { menu.classList.remove("open"); await updateAll(); } }),
     el("button", { class: "btn", style: miStyle, text: "サイズ基準を再登録（UNIQLO）", onclick: async () => { menu.classList.remove("open"); await reseedBase(); } }),
     el("div", { style: "height:1px;background:var(--line);margin:5px 3px;" }),
-    el("button", { class: "btn", style: miStyle + "color:var(--accent);", text: "すべて削除", onclick: async () => { if (confirm("すべてのアイテムを削除します（サイズ基準のUNIQLOも消えます）。よろしいですか？\n※ 基準は⋯メニュー「サイズ基準を再登録」で戻せます。")) { await setItems([]); } menu.classList.remove("open"); } }),
+    el("button", { class: "btn", style: miStyle + "color:var(--stone);font-size:12px;", text: "データ管理（全消去…）", onclick: () => { menu.classList.remove("open"); openDangerZone(); } }),
     fileInput,
   ]);
   const mo = new MutationObserver(() => { menuPanel.style.display = menu.classList.contains("open") ? "block" : "none"; });
@@ -1011,6 +1011,45 @@ async function reseedBase() {
     await setBases(b);
   }
   alert("UNIQLO エアリズムコットンT 2XL をサイズ基準として再登録しました。");
+}
+
+// Danger zone: full data wipe behind a typed confirmation + double confirm, with
+// a backup shortcut. Separated from the one-tap menu so it can't be hit by accident.
+function openDangerZone() {
+  const overlay = el("div", { class: "overlay", onclick: (e) => { if (e.target === overlay) overlay.remove(); } });
+  const n = items.length;
+  const confirmInput = el("input", { placeholder: "削除", inputmode: "text", autocapitalize: "off", autocorrect: "off" });
+  const delBtn = el("button", { class: "btn btn-ink", text: "全データを削除", style: "background:var(--accent);border-color:var(--accent);opacity:.5;pointer-events:none;" });
+  const sync = () => {
+    const ok = confirmInput.value.trim() === "削除";
+    delBtn.style.opacity = ok ? "1" : ".5";
+    delBtn.style.pointerEvents = ok ? "auto" : "none";
+  };
+  confirmInput.addEventListener("input", sync);
+  delBtn.addEventListener("click", async () => {
+    if (confirmInput.value.trim() !== "削除") return;
+    if (!confirm(`本当に ${n} 件すべて（お気に入り・コーデ・サイズ基準）を削除しますか？\nこの操作は元に戻せません。`)) return;
+    if (!confirm("最終確認：完全に消去します。よろしいですか？")) return;
+    await setOutfits([]); await setBases({}); await setItems([]); // items last -> triggers reload
+    overlay.remove();
+    toast("すべて削除しました");
+  });
+  const modal = el("div", { class: "modal sm", onclick: (e) => e.stopPropagation() }, [
+    el("button", { class: "x", text: "×", onclick: () => overlay.remove() }),
+    el("h2", { class: "serif", text: "データ管理" }),
+    el("div", { style: "font-size:12.5px;color:var(--stone);line-height:1.7;margin-bottom:12px;" }, [
+      `保存中の ${n} 件のお気に入り・コーデ・サイズ基準を`, el("b", { text: "すべて削除" }), "できます。",
+      el("br"), el("b", { style: "color:var(--accent);", text: "元に戻せません。" }), " 先にバックアップの保存をおすすめします。",
+    ]),
+    el("button", { class: "btn btn-ghost", style: "width:100%;margin-bottom:14px;", text: "⬇ バックアップを保存（JSON）", onclick: async () => { await exportJson(); } }),
+    el("div", { class: "fld" }, [el("label", { text: "確認のため「削除」と入力", style: "color:var(--accent);" }), confirmInput]),
+    el("div", { class: "modal-foot" }, [
+      el("button", { class: "btn btn-ghost", text: "キャンセル", onclick: () => overlay.remove() }),
+      delBtn,
+    ]),
+  ]);
+  sync();
+  overlay.append(modal); document.body.append(overlay);
 }
 
 async function handleHashAdd() {
