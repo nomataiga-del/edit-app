@@ -19,8 +19,19 @@
   <script src="bookmarklet.js"></script>
   <script type="module" src="popup.js"></script>
   <script>
+    // Register SW and auto-refresh once when a new version takes over, so
+    // redeploys reach the phone without manual cache-clearing.
     if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+      let reloaded = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (reloaded) return; reloaded = true; location.reload();
+      });
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").then((reg) => {
+          reg.update().catch(() => {});
+          setInterval(() => reg.update().catch(() => {}), 60000); // check for updates periodically
+        }).catch(() => {});
+      });
     }
   </script>
 </body>
