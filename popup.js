@@ -299,6 +299,25 @@ function effectiveMeasures(it) {
   return ks.length ? by[ks[ks.length - 1]] : {};
 }
 
+// All selectable sizes for an item: the sizes string, plus any size keys that
+// only appear in the measurement / stock maps (deduped, in a sensible order).
+function sizeOptionList(it) {
+  const out = [], seen = new Set();
+  const push = (s) => { const k = String(s || "").trim(); if (k && !seen.has(k)) { seen.add(k); out.push(k); } };
+  String(it.sizes || "").split(",").forEach(push);
+  Object.keys(it.measuresBySize || {}).forEach(push);
+  Object.keys(it.availBySize || {}).forEach(push);
+  return out;
+}
+// The size currently reflected on the card: the user's pick, else the last (largest).
+function shownSize(it) { const o = sizeOptionList(it); return it.sizePicked || (o.length ? o[o.length - 1] : ""); }
+// Availability shown on the card: once the user PICKS a size, that size's stock
+// (stock differs by size); before any pick, the item-level (overall) value.
+function effectiveAvailability(it) {
+  const by = it.availBySize || {};
+  return (it.sizePicked && by[it.sizePicked]) ? by[it.sizePicked] : (it.availability || "");
+}
+
 // A compact measurements line: shows each field's actual cm value, and — when
 // a base garment is set for this major (and this isn't the base) — the ±diff.
 function measuresLine(it) {
@@ -325,15 +344,17 @@ function measuresLine(it) {
   return wrap;
 }
 
-// A per-size selector shown when an item carries an auto-extracted size table,
-// so the ±diff reflects the size you'd actually buy.
+// A per-size selector: pick the size you'd actually buy, and the card reflects
+// that size's ±fit AND its stock (availability differs by size). Selecting a size
+// does NOT reorder the list (patchItem keeps _ts).
+const AVAIL_SHORT = { instock: "在庫あり", outofstock: "在庫なし", preorder: "予約" };
 function sizePicker(it) {
-  const by = it.measuresBySize || {};
-  const ks = Object.keys(by);
-  if (ks.length < 2) return null;
+  const opts = sizeOptionList(it);
+  if (opts.length < 2) return null;
+  const avail = it.availBySize || {};
   const sel = el("select", { style: "font-size:11px;padding:2px 6px;border-radius:7px;border:1px solid var(--line);margin-top:4px;max-width:100%;", onchange: (e) => patchItem(it.id, { sizePicked: e.target.value }) },
-    ks.map((k) => el("option", { value: k, text: `実寸サイズ: ${k}` })));
-  sel.value = it.sizePicked || ks[ks.length - 1];
+    opts.map((k) => { const st = AVAIL_SHORT[avail[k]]; return el("option", { value: k, text: `サイズ ${k}${st ? " ・" + st : ""}` }); }));
+  sel.value = shownSize(it);
   return sel;
 }
 
@@ -367,7 +388,7 @@ function card(it) {
   ]));
   // top-left stack of state badges (kept clear of the heart TR and acts bottom)
   const tl = el("div", { style: "position:absolute;top:8px;left:8px;z-index:3;display:flex;flex-direction:column;gap:4px;align-items:flex-start;max-width:calc(100% - 46px);" });
-  const ab = availBadge(it.availability);
+  const ab = availBadge(effectiveAvailability(it));
   if (ab) tl.append(ab);
   if (bought) tl.append(el("span", { text: "購入済み", style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--ink);color:var(--paper);" }));
   if (isBase(it)) tl.append(el("span", { text: "基準", style: "font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;background:#3E5A57;color:#fff;" }));
@@ -742,6 +763,7 @@ async function recheck(it, btn) {
         if (r.ok) {
           const s = shopifyFromJson(await r.json(), { currency: it.currency, href: it.url });
           if (s) for (const k of ["price", "availability", "image", "name", "brand", "sizes"]) if (s[k]) patch[k] = s[k];
+          if (s && s.availBySize && Object.keys(s.availBySize).length) patch.availBySize = s.availBySize;
         }
       } catch { /* fall through to generic */ }
     }
@@ -887,6 +909,7 @@ async function captureViaWorker(url, fallbackName) {
     currency: cur, image: d.image || "", availability: d.availability || "",
     sizes: d.sizes || "", colors: d.colors || "", color: d.color || "",
     measuresBySize: (d.measuresBySize && typeof d.measuresBySize === "object") ? d.measuresBySize : {},
+    availBySize: (d.availBySize && typeof d.availBySize === "object") ? d.availBySize : {},
     major: g.major, sub: g.sub,
   });
   await afterCapture(id, cur);
@@ -910,7 +933,7 @@ async function captureShopifyClientSide(url, fallbackName) {
       url, domain, site: siteNameFromDomain(domain),
       name: s.name || fallbackName || "", brand: s.brand, price: s.price,
       currency: cur, image: s.image, availability: s.availability,
-      sizes: s.sizes, colors: s.colors, major: g.major, sub: g.sub,
+      sizes: s.sizes, colors: s.colors, availBySize: s.availBySize || {}, major: g.major, sub: g.sub,
     });
     await afterCapture(id, cur);
     return true;
@@ -991,6 +1014,7 @@ async function updateAll() {
         const patch = {};
         for (const k of ["price", "image", "name", "brand", "availability", "sizes", "colors", "color"]) if (d[k]) patch[k] = d[k];
         if (d.measuresBySize && Object.keys(d.measuresBySize).length) { patch.measuresBySize = d.measuresBySize; meas++; }
+        if (d.availBySize && Object.keys(d.availBySize).length) patch.availBySize = d.availBySize;
         if (!it.major && d.major) { patch.major = d.major; patch.sub = d.sub || ""; } // backfill category only if未分類
         if (Object.keys(patch).length) { await patchItem(it.id, patch); ok++; } else skip++;
       } else skip++;

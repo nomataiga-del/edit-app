@@ -337,7 +337,8 @@ export async function addItem(data) {
       if (data[f]) merged[f] = data[f];
     }
     if (data.measuresBySize && Object.keys(data.measuresBySize).length) merged.measuresBySize = data.measuresBySize;
-    merged._ts = Date.now();
+    if (data.availBySize && Object.keys(data.availBySize).length) merged.availBySize = data.availBySize;
+    merged._updated = Date.now(); // keep _ts (added time) so re-fetches don't reorder the list
     items[idx] = merged;
     await setItems(items);
     return { status: "updated", id: merged.id };
@@ -352,6 +353,7 @@ export async function addItem(data) {
     sub: "",
     measures: {},
     measuresBySize: {},
+    availBySize: {},
     sizePicked: "",
     color: "",
     colors: "",
@@ -410,6 +412,7 @@ export function normalizeImported(raw) {
     sizes: s(raw && raw.sizes),
     measures: sanitizeMeasures(raw && raw.measures),
     measuresBySize: (raw && raw.measuresBySize && typeof raw.measuresBySize === "object") ? raw.measuresBySize : {},
+    availBySize: (raw && raw.availBySize && typeof raw.availBySize === "object") ? raw.availBySize : {},
     sizePicked: s(raw && raw.sizePicked),
     color: s(raw && raw.color),
     colors: s(raw && raw.colors),
@@ -469,7 +472,8 @@ export async function patchItem(id, patch) {
   const items = await getItems();
   const idx = items.findIndex((i) => i.id === id);
   if (idx < 0) return null;
-  items[idx] = { ...items[idx], ...patch, _ts: Date.now() };
+  // keep _ts (added time) so edits/re-checks/size-picks don't reorder the list
+  items[idx] = { ...items[idx], ...patch, _updated: Date.now() };
   await setItems(items);
   return items[idx];
 }

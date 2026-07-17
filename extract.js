@@ -156,6 +156,20 @@ export function shopifyColors(p) {
   return "";
 }
 
+// Per-size availability from a Shopify product's variants (stock differs by size).
+// Returns { "M": "instock", "L": "outofstock", … }.
+export function shopifyAvailBySize(p) {
+  const opts = Array.isArray(p && p.options) ? p.options : [];
+  let sizeIdx = -1;
+  opts.forEach((o, i) => { const name = typeof o === "string" ? o : (o && o.name) || ""; if (/size|サイズ|寸/i.test(name)) sizeIdx = i; });
+  const variants = Array.isArray(p && p.variants) ? p.variants : [];
+  const out = {};
+  const mark = (s, v) => { const k = String(s || "").trim(); if (!k || k === "Default Title") return; out[k] = v && v.available === false ? "outofstock" : "instock"; };
+  if (sizeIdx >= 0) { const key = "option" + (sizeIdx + 1); variants.forEach((v) => mark(v && v[key], v)); }
+  else if (opts.length === 1) { variants.forEach((v) => mark(v && (v.option1 || v.title), v)); }
+  return out;
+}
+
 // Map a parsed Shopify product-JSON object to a partial item.
 export function shopifyFromJson(p, opts = {}) {
   if (!p || typeof p !== "object") return null;
@@ -172,6 +186,7 @@ export function shopifyFromJson(p, opts = {}) {
     availability: p.available === true ? "instock" : (p.available === false ? "outofstock" : ""),
     sizes: shopifySizes(p),
     colors: shopifyColors(p),
+    availBySize: shopifyAvailBySize(p),
   };
 }
 
