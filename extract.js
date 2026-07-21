@@ -302,36 +302,87 @@ const MEASURE_HEADER_MAP = {
   "ウエスト": "ウエスト", "ウェスト": "ウエスト", "股上": "股上", "股下": "股下",
   "わたり": "わたり幅", "わたり幅": "わたり幅", "もも幅": "わたり幅", "裾幅": "裾幅",
 };
+// First number in a table cell. Handles ranges ("70~86cm" -> 70, the nominal
+// lower bound) and unit suffixes; size-chart values are cm by convention.
+function cellNum(cell) {
+  const m = String(cell || "").match(/[0-9]+(?:\.[0-9]+)?/);
+  return m ? m[0] : "";
+}
+function fieldFromCell(cell, known) {
+  const k = known.find((kk) => String(cell || "").includes(kk));
+  return k ? MEASURE_HEADER_MAP[k] : "";
+}
+
+// Row format: header row lists measure names, each following row is one size.
+function measuresRowFormat(rows, known) {
+  let hi = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].filter((x) => known.some((k) => x.includes(k))).length >= 2) { hi = i; break; }
+  }
+  if (hi < 0) return null;
+  const header = rows[hi];
+  const colField = {};
+  header.forEach((h, idx) => { const f = fieldFromCell(h, known); if (f) colField[idx] = f; });
+  if (!Object.keys(colField).length) return null;
+  let sizeCol = header.findIndex((h) => /サイズ|size/i.test(h));
+  if (sizeCol < 0) sizeCol = 0;
+  const bySize = {}, order = [];
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const size = (r[sizeCol] || "").trim();
+    if (!size || /単位|cm|inch|備考/i.test(size)) continue;
+    const m = {};
+    for (const idx of Object.keys(colField)) {
+      const v = cellNum(r[idx]);
+      if (v) m[colField[idx]] = v;
+    }
+    if (Object.keys(m).length) { bySize[size] = m; order.push(size); }
+  }
+  return order.length ? { bySize, order } : null;
+}
+
+// Transposed format (common on JP EC): sizes across the header row, one
+// measure per row ("肩幅 | 42 | 44 | 46").
+function measuresTransposed(rows, known) {
+  const firstFieldRow = rows.findIndex((r) => fieldFromCell(r[0], known));
+  if (firstFieldRow < 0) return null;
+  const fieldRows = rows.filter((r) => fieldFromCell(r[0], known));
+  if (fieldRows.length < 2) return null;
+  // header: the closest row above the field rows with >=2 size-looking cells
+  let header = null;
+  for (let i = 0; i < firstFieldRow; i++) {
+    const sizeCols = [];
+    rows[i].forEach((c, idx) => { if (idx > 0 && looksLikeSize(c)) sizeCols.push(idx); });
+    if (sizeCols.length >= 2) header = { r: rows[i], sizeCols };
+  }
+  if (!header) return null;
+  const bySize = {}, order = [];
+  for (const idx of header.sizeCols) {
+    const s = header.r[idx].trim();
+    if (!(s in bySize)) { bySize[s] = {}; order.push(s); }
+  }
+  for (const r of fieldRows) {
+    const f = fieldFromCell(r[0], known);
+    for (const idx of header.sizeCols) {
+      const v = cellNum(r[idx]);
+      if (v) bySize[header.r[idx].trim()][f] = v;
+    }
+  }
+  const kept = order.filter((s) => Object.keys(bySize[s]).length);
+  if (!kept.length) return null;
+  const out = {};
+  kept.forEach((s) => { out[s] = bySize[s]; });
+  return { bySize: out, order: kept };
+}
+
 export function measuresFromTable(doc) {
   const known = Object.keys(MEASURE_HEADER_MAP);
   for (const table of doc.querySelectorAll("table")) {
     const rows = Array.from(table.querySelectorAll("tr"))
       .map((tr) => Array.from(tr.querySelectorAll("th,td")).map((c) => (c.textContent || "").trim()));
     if (rows.length < 2) continue;
-    let hi = -1;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].filter((x) => known.some((k) => x.includes(k))).length >= 2) { hi = i; break; }
-    }
-    if (hi < 0) continue;
-    const header = rows[hi];
-    const colField = {};
-    header.forEach((h, idx) => { const k = known.find((kk) => h.includes(kk)); if (k) colField[idx] = MEASURE_HEADER_MAP[k]; });
-    if (!Object.keys(colField).length) continue;
-    let sizeCol = header.findIndex((h) => /サイズ|size/i.test(h));
-    if (sizeCol < 0) sizeCol = 0;
-    const bySize = {}, order = [];
-    for (let i = hi + 1; i < rows.length; i++) {
-      const r = rows[i];
-      const size = (r[sizeCol] || "").trim();
-      if (!size || /単位|cm|inch|備考/i.test(size)) continue;
-      const m = {};
-      for (const idx of Object.keys(colField)) {
-        const v = (r[idx] || "").replace(/[^0-9.]/g, ""); // size-chart values are already in cm
-        if (v && !isNaN(Number(v))) m[colField[idx]] = v;
-      }
-      if (Object.keys(m).length) { bySize[size] = m; order.push(size); }
-    }
-    if (order.length) return { bySize, order };
+    const hit = measuresRowFormat(rows, known) || measuresTransposed(rows, known);
+    if (hit) return hit;
   }
   return null;
 }

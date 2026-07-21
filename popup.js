@@ -10,6 +10,12 @@ import {
   ensureSeeded, sourceKind, effectiveSource, SEED_BASE,
   getFx, setFx, defaultFx, toJPY, currencyCode,
   getWorker, setWorker,
+  getLastBackupAt, setLastBackupAt, getBackupSnoozeUntil, setBackupSnoozeUntil,
+  backupReminderState, BACKUP_SNOOZE_DAYS,
+  getSyncEnabled, setSyncEnabled, getSyncToken, setSyncToken,
+  getSyncLastPush, setSyncLastPush, getSyncLastPull, setSyncLastPull,
+  validSyncToken, genSyncToken, syncEndpoint, changesNeedPush, remapImportedBases,
+  SYNC_PUSH_DEBOUNCE_MS,
 } from "./store.js";
 import { extractProduct, DOMAIN_RULES, shopifyProductJsonUrl, shopifyFromJson, guessCategory } from "./extract.js";
 
@@ -34,6 +40,8 @@ let cats = defaultCategories(); // user-customizable category config
 let bases = {};                 // { [major]: itemId } base garment per major
 let fx = defaultFx();           // manual FX rates (yen per unit)
 let workerUrl = "";             // optional extract-proxy for non-Shopify (mobile)
+// クラウド同期（自動バックアップ）state — loaded in reload(), driven by the sync block below
+let syncEnabled = false, syncToken = "", syncLastPush = 0, syncLastPull = 0;
 let viewMode = "items"; // "items" | "outfits"
 let query = "", fSite = "すべて", fStatus = "すべて", fMajor = "すべて", fSub = "すべて", sort = "new";
 let fOfficialOnly = false; // 軸a: show only brand-official (non-marketplace) items
@@ -93,6 +101,7 @@ function buildShell() {
     el("button", { class: "btn", style: miStyle, text: "カテゴリ設定", onclick: () => { menu.classList.remove("open"); openCategorySettings(); } }),
     el("button", { class: "btn", style: miStyle, text: "為替レート設定", onclick: () => { menu.classList.remove("open"); openFxSettings(); } }),
     el("button", { class: "btn", style: miStyle, text: "取得代行URLを設定", onclick: async () => { menu.classList.remove("open"); const cur = await getWorker(); const v = prompt("取得代行(Cloudflare Worker)のURL\n例: https://edit-extract.xxxx.workers.dev\n（空欄で無効化）", cur || ""); if (v !== null) { await setWorker(v); workerUrl = v.trim(); alert(v.trim() ? "設定しました。非Shopifyサイトも 共有→自動取得 を試します。" : "取得代行を無効化しました。"); } } }),
+    el("button", { class: "btn", style: miStyle, text: "クラウド同期（自動バックアップ）", onclick: () => { menu.classList.remove("open"); openSyncSettings(); } }),
     window.__EDIT_WEB__ ? el("button", { class: "btn", style: miStyle, text: "ブックマークレット設定", onclick: () => { menu.classList.remove("open"); openBookmarkletHelp(); } }) : null,
     el("div", { style: "height:1px;background:var(--line);margin:5px 3px;" }),
     el("button", { class: "btn", style: miStyle, text: "エクスポート（JSON）", onclick: async () => { await exportJson(); menu.classList.remove("open"); } }),
@@ -146,9 +155,35 @@ function buildShell() {
   const meta = el("div", { class: "meta", id: "meta" });
   const scroll = el("div", { class: "scroll" });
   const bar = el("div", { id: "barwrap" });
+  const notice = el("div", { id: "notice" }); // backup reminder banner slot (renderBackupNotice)
 
-  app.append(hdr, filters, majorTabs, subTabs, meta, scroll, bar);
-  refs = { ...refs, chips, majorTabs, subTabs, meta, scroll, bar };
+  app.append(hdr, notice, filters, majorTabs, subTabs, meta, scroll, bar);
+  refs = { ...refs, notice, chips, majorTabs, subTabs, meta, scroll, bar };
+}
+
+/* ---------- backup reminder banner（データ消失対策） ---------- */
+// Browsers can evict the PWA's localStorage (and a lost/reset device loses
+// chrome.storage too), so nudge for a periodic JSON export. Non-intrusive:
+// a slim banner under the header, only when 10+ items AND no/stale backup.
+async function renderBackupNotice() {
+  if (!refs.notice) return;
+  const last = await getLastBackupAt();
+  const snooze = await getBackupSnoozeUntil();
+  // クラウド同期ON = automatic backups — the manual-export nag is suppressed then
+  const { show, days } = backupReminderState(items.length, last, snooze, Date.now(), syncEnabled);
+  refs.notice.innerHTML = "";
+  if (!show) return;
+  const when = days == null ? "なし" : days === 0 ? "今日" : `${days}日前`;
+  refs.notice.append(el("div", { class: "notice" }, [
+    el("span", { class: "notice-t", text: `最終バックアップ: ${when}。端末やブラウザの都合でデータが消えることがあります。エクスポートで保存を推奨` }),
+    el("span", { class: "notice-acts" }, [
+      el("button", { class: "btn btn-ink", style: "padding:5px 12px;font-size:11.5px;", text: "今すぐエクスポート", onclick: () => exportJson() }),
+      el("button", {
+        class: "btn btn-ghost", style: "padding:5px 10px;font-size:11.5px;", text: "後で（7日再通知しない）",
+        onclick: async () => { refs.notice.innerHTML = ""; await setBackupSnoozeUntil(Date.now() + BACKUP_SNOOZE_DAYS * 86400000); },
+      }),
+    ]),
+  ]));
 }
 
 // site / status / search filter, independent of category (used for tab counts)
@@ -251,7 +286,17 @@ function priceEl(it, bought) {
   if (currencyCode(it.currency) !== "JPY" && yen != null) {
     kids.push(el("span", { style: "font-size:11px;color:var(--stone);margin-left:6px;", text: `≈¥${yen.toLocaleString()}` }));
   }
-  return el("span", { style: "display:inline-flex;align-items:baseline;" }, kids);
+  // price change since last capture (軸b): ▼drop in green, ▲rise muted
+  const prev = Number(it.prevPrice), cur = Number(it.price);
+  if (it.prevPrice && !isNaN(prev) && !isNaN(cur) && prev !== cur) {
+    const drop = cur < prev;
+    kids.push(el("span", {
+      title: `前回 ${fmtPrice(it.prevPrice, it.currency)}`,
+      style: `font-size:11px;font-weight:600;margin-left:6px;color:${drop ? "#3E7D5A" : "var(--stone)"};`,
+      text: `${drop ? "▼" : "▲"}${fmtPrice(String(Math.abs(cur - prev)), it.currency)}`,
+    }));
+  }
+  return el("span", { style: "display:inline-flex;align-items:baseline;flex-wrap:wrap;" }, kids);
 }
 
 function availBadge(a) {
@@ -722,10 +767,15 @@ async function reload() {
   if (basesChanged) await setBases(bases);
   fx = await getFx();
   workerUrl = await getWorker();
+  syncEnabled = await getSyncEnabled();
+  syncToken = await getSyncToken();
+  syncLastPush = await getSyncLastPush();
+  syncLastPull = await getSyncLastPull();
   // persist one-time category migration (idempotent on subsequent loads)
   const changed = items.some((it, i) => it.major !== raw[i].major || it.sub !== raw[i].sub);
   if (changed) await setItems(items);
   update();
+  await renderBackupNotice();
 }
 
 async function toggleStatus(id) {
@@ -784,6 +834,7 @@ async function recheck(it, btn) {
       return;
     }
     const msgs = [];
+    if (patch.price && it.price && patch.price !== it.price) { patch.prevPrice = it.price; patch.prevPriceAt = Date.now(); }
     if (patch.price && patch.price !== it.price) msgs.push(`価格：${fmtPrice(it.price, it.currency)} → ${fmtPrice(patch.price, patch.currency || it.currency)}`);
     if (patch.availability && patch.availability !== it.availability) msgs.push(`在庫：${availLabel(it.availability)} → ${availLabel(patch.availability)}`);
     if (patch.measuresBySize) msgs.push("実寸表を取得しました");
@@ -807,6 +858,7 @@ async function exportJson() {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+  await setLastBackupAt(); // feeds the backup reminder (storage change re-renders the banner)
 }
 
 function importJson(file) {
@@ -830,6 +882,138 @@ function importJson(file) {
   reader.onerror = () => alert("ファイルの読み込みに失敗しました。");
   reader.readAsText(file);
 }
+
+/* ---------- cloud sync（自動バックアップ・Cloudflare Worker KV） ---------- */
+// Root fix for the PWA localStorage wipe: data changes are PUT (debounced) to
+// the user's own worker /sync under a secret token; boot GETs and merges.
+// Same token on PC and phone -> effective PC⇔スマホ sync. All failures are
+// silent (retried on the next change / tab-hide); the UI only shows timestamps.
+let syncDirty = false;      // a data change happened since the last successful push
+let syncPushTimer = null;
+let syncApplying = false;   // applying cloud data locally — don't re-push what we just pulled
+
+function syncReady() { return syncEnabled && validSyncToken(syncToken) && !!workerUrl; }
+
+async function fullExportEnvelope() {
+  return toExport(await getItems(), { outfits: await getOutfits(), bases: await getBases(), categories: await getCategories() });
+}
+
+// PUT the full envelope now. Returns true on success.
+async function syncPushNow({ interactive = false } = {}) {
+  if (!syncReady()) return false;
+  if (syncPushTimer) { clearTimeout(syncPushTimer); syncPushTimer = null; }
+  try {
+    const envData = await fullExportEnvelope();
+    // Fresh-device guard: never AUTO-push an empty/seed-only store from a device
+    // that has never successfully pulled — if the restore failed (offline etc.),
+    // the cloud may be the ONLY copy and this push would bury it. The worker has
+    // a matching server-side shrink guard as the second line of defense.
+    if (!interactive) {
+      const bare = (envData.items || []).every((i) => normUrl(i.url) === normUrl(SEED_BASE.url));
+      if (bare && !(await getSyncLastPull())) return false;
+    }
+    const body = JSON.stringify(envData);
+    const opts = { method: "PUT", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(15000) };
+    // keepalive lets the final tab-hide push survive page close, but browsers
+    // cap keepalive bodies (~64KB) — only request it for small payloads.
+    if (body.length < 60000) opts.keepalive = true;
+    const r = await fetch(syncEndpoint(workerUrl, syncToken), opts);
+    if (!r.ok) {
+      if (interactive) {
+        let msg = "HTTP " + r.status;
+        try { const d = await r.json(); if (d && d.error) msg = d.error + (d.setup ? "\n\n設定手順：" + d.setup : ""); } catch { /* keep HTTP status */ }
+        alert("クラウドへの保存に失敗しました：\n" + msg);
+      }
+      return false;
+    }
+    syncDirty = false;
+    await setSyncLastPush(Date.now());
+    return true;
+  } catch (e) {
+    if (interactive) alert("クラウドへの保存に失敗しました（通信エラー）。Worker URL を確認してください。\n" + (e && e.message ? e.message : String(e)));
+    return false;
+  }
+}
+
+// Debounced push after a data change — keeps KV writes well under the
+// free tier's 1,000/day even during a long editing session.
+function scheduleSyncPush() {
+  syncDirty = true;
+  if (!syncReady()) return; // stays dirty; pushed after 同期ON or on the next change
+  if (syncPushTimer) clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(() => { syncPushTimer = null; syncPushNow(); }, SYNC_PUSH_DEBOUNCE_MS);
+}
+
+// GET the cloud copy and reconcile. "Local is empty" is seed-aware: a fresh or
+// wiped install holds at most the first-run UNIQLO seed. Then:
+//   empty local + cloud data  -> full restore (items + outfits/bases/categories)
+//   both have data            -> mergeImport (normUrl 冪等 dedup), items only
+// Returns "off" | "error" | "empty" | "restored" | "merged".
+async function syncPullMerge({ notify = false } = {}) {
+  if (!syncReady()) return "off";
+  let parsed;
+  try {
+    const r = await fetch(syncEndpoint(workerUrl, syncToken), { signal: AbortSignal.timeout(15000) });
+    if (r.status === 404) return "empty"; // nothing uploaded under this token yet
+    if (!r.ok) return "error";
+    parsed = await r.json();
+  } catch { return "error"; }
+  let incoming;
+  try { incoming = itemsFromParsed(parsed); } catch { return "error"; }
+
+  const local = await getItems();
+  const localEmpty = local.every((i) => normUrl(i.url) === normUrl(SEED_BASE.url)); // [] -> true
+  syncApplying = true;
+  try {
+    if (localEmpty && incoming.length) {
+      const { items: merged, added } = mergeImport(local, incoming);
+      await setItems(merged);
+      if (Array.isArray(parsed.outfits)) await setOutfits(parsed.outfits);
+      if (parsed.bases && typeof parsed.bases === "object") {
+        // keep the local seed-base mapping, overlay the cloud's (id-repaired)
+        await setBases({ ...(await getBases()), ...remapImportedBases(parsed.bases, incoming, merged) });
+      }
+      if (Array.isArray(parsed.categories) && parsed.categories.length) await setCategories(parsed.categories);
+      await setSyncLastPull(Date.now());
+      toast(`クラウドから${added}件復元しました`);
+      return "restored";
+    }
+    const { items: merged, added } = mergeImport(local, incoming);
+    await setItems(merged);
+    await setSyncLastPull(Date.now());
+    if (notify && added) toast(`クラウドから${added}件追加しました`);
+    return "merged";
+  } finally {
+    // storage events can arrive after the awaits — release on a delay so the
+    // pull itself never schedules a redundant re-push
+    setTimeout(() => { syncApplying = false; }, 300);
+  }
+}
+
+// Boot / 同期ON: pull first, then push so both sides converge.
+//   restored -> cloud already holds this data, nothing to upload
+//   merged/empty -> upload the (merged) local state = the actual sync step
+async function syncBoot() {
+  if (!syncReady()) return;
+  const res = await syncPullMerge({});
+  if (res === "restored") { syncDirty = false; if (syncPushTimer) { clearTimeout(syncPushTimer); syncPushTimer = null; } return; }
+  if (res === "merged" || res === "empty") await syncPushNow();
+}
+
+// Manual 「今すぐ同期」 (from the settings modal): pull+merge, then push.
+async function syncNow() {
+  const pulled = await syncPullMerge({ notify: true });
+  const pushed = await syncPushNow({ interactive: true });
+  if (pushed) toast("同期しました");
+  else if (pulled === "restored" || pulled === "merged") toast("取得はできましたが、アップロードに失敗しました");
+  return pushed;
+}
+
+// Flush pending changes when the tab/popup goes to background (mobile especially
+// may never fire a clean unload) — the debounce timer might not survive.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && syncDirty && syncReady()) syncPushNow();
+});
 
 function clipCurrent() {
   if (window.__EDIT_WEB__) { openWebAdd(); return; }
@@ -982,7 +1166,13 @@ function openWebAdd(prefill = {}) {
 async function fetchItemData(url, fallbackName) {
   url = (url || "").trim();
   const d = await workerFetch(url); // worker handles Shopify + non-Shopify, and returns 実寸
-  if (d) { if (!d.currency) d.currency = guessCurrencyByTld(d.domain || ""); return d; }
+  if (d) {
+    // _curAuth: currency came from page metadata (JSON-LD/og) — trustworthy enough
+    // to CORRECT a stored value. A TLD guess is a default only, never an override.
+    d._curAuth = !!d.currency;
+    if (!d.currency) d.currency = guessCurrencyByTld(d.domain || "");
+    return d;
+  }
   const jsUrl = shopifyProductJsonUrl(url);
   if (jsUrl) {
     try {
@@ -1006,6 +1196,7 @@ async function updateAll() {
   if (!targets.length) { alert("更新できるアイテムがありません。"); return; }
   if (!confirm(`${targets.length} 件を一括更新します。\n価格・在庫・画像・サイズ・実寸を取り直します（メモ・状態・カテゴリ・選択サイズはそのまま）。`)) return;
   let ok = 0, meas = 0, skip = 0, done = 0;
+  const drops = [], rises = [];
   toast(`一括更新中… 0/${targets.length}`);
   for (const it of targets) {
     try {
@@ -1016,13 +1207,28 @@ async function updateAll() {
         if (d.measuresBySize && Object.keys(d.measuresBySize).length) { patch.measuresBySize = d.measuresBySize; meas++; }
         if (d.availBySize && Object.keys(d.availBySize).length) patch.availBySize = d.availBySize;
         if (!it.major && d.major) { patch.major = d.major; patch.sub = d.sub || ""; } // backfill category only if未分類
+        // currency correction: only when the page metadata is authoritative — heals
+        // items captured without the worker (e.g. stored as ¥ on a EUR shop)
+        if (d._curAuth && d.currency && currencyCode(d.currency) !== currencyCode(it.currency)) patch.currency = d.currency;
+        // price change tracking: persist the previous price and collect a summary
+        // (skip when the currency changed — old/new prices aren't comparable)
+        if (d.price && it.price && d.price !== it.price && !patch.currency) {
+          patch.prevPrice = it.price; patch.prevPriceAt = Date.now();
+          const diff = Number(d.price) - Number(it.price);
+          (diff < 0 ? drops : rises).push(`${it.name || it.brand || "?"}：${fmtPrice(it.price, it.currency)} → ${fmtPrice(d.price, it.currency)}`);
+        }
         if (Object.keys(patch).length) { await patchItem(it.id, patch); ok++; } else skip++;
       } else skip++;
     } catch { skip++; }
     done++;
     if (done % 3 === 0 || done === targets.length) toast(`一括更新中… ${done}/${targets.length}`);
   }
-  alert(`一括更新 完了\n${ok} 件を更新（うち実寸 ${meas} 件）/ ${skip} 件は取得できず。\n※ 取得できないサイトは、アイテムの ✎ から実寸を手入力できます。`);
+  let msg = `一括更新 完了\n${ok} 件を更新（うち実寸 ${meas} 件）/ ${skip} 件は取得できず。`;
+  if (drops.length) msg += `\n\n▼ 値下げ ${drops.length} 件\n` + drops.slice(0, 5).map((s) => "・" + s).join("\n") + (drops.length > 5 ? `\n…ほか${drops.length - 5}件` : "");
+  if (rises.length) msg += `\n\n▲ 値上げ ${rises.length} 件`;
+  if (!drops.length && !rises.length) msg += `\n価格の変動はありませんでした。`;
+  msg += `\n※ 取得できないサイトは、アイテムの ✎ から実寸を手入力できます。`;
+  alert(msg);
 }
 
 // Re-add the UNIQLO size base (after an accidental "すべて削除").
@@ -1050,13 +1256,33 @@ function openDangerZone() {
     delBtn.style.pointerEvents = ok ? "auto" : "none";
   };
   confirmInput.addEventListener("input", sync);
+  // With sync ON the user must decide what happens to the cloud copy — keeping
+  // it (default) turns sync OFF so the wipe can't propagate; the cloud then
+  // doubles as the restore point (re-enable sync to pull everything back).
+  const wipeCloudCb = el("input", { type: "checkbox" });
   delBtn.addEventListener("click", async () => {
     if (confirmInput.value.trim() !== "削除") return;
     if (!confirm(`本当に ${n} 件すべて（お気に入り・コーデ・サイズ基準）を削除しますか？\nこの操作は元に戻せません。`)) return;
     if (!confirm("最終確認：完全に消去します。よろしいですか？")) return;
+    const wipeCloud = syncEnabled && wipeCloudCb.checked;
+    if (syncEnabled && !wipeCloud) {
+      // keep the cloud backup: stop sync BEFORE wiping so nothing propagates
+      syncEnabled = false; await setSyncEnabled(false);
+    }
     await setOutfits([]); await setBases({}); await setItems([]); // items last -> triggers reload
+    if (wipeCloud) {
+      // explicit cloud wipe: force past the worker's shrink guard
+      try {
+        await fetch(syncEndpoint(workerUrl, syncToken) + "&force=1", {
+          method: "PUT", headers: { "content-type": "application/json" },
+          body: JSON.stringify(toExport([], { outfits: [], bases: {}, categories: [] })),
+          signal: AbortSignal.timeout(15000),
+        });
+      } catch { /* cloud wipe is best-effort; guard would reject later empty pushes anyway */ }
+    }
     overlay.remove();
-    toast("すべて削除しました");
+    toast(wipeCloud ? "端末とクラウドの両方を削除しました" : (syncToken ? "削除しました（クラウドのバックアップは残っています）" : "すべて削除しました"));
+    if (syncToken && !wipeCloud) setTimeout(() => alert("クラウドのバックアップは残してあります。\n復元するには ⋯→「クラウド同期」を再度ONにしてください（同じトークンのまま）。"), 400);
   });
   const modal = el("div", { class: "modal sm", onclick: (e) => e.stopPropagation() }, [
     el("button", { class: "x", text: "×", onclick: () => overlay.remove() }),
@@ -1066,6 +1292,10 @@ function openDangerZone() {
       el("br"), el("b", { style: "color:var(--accent);", text: "元に戻せません。" }), " 先にバックアップの保存をおすすめします。",
     ]),
     el("button", { class: "btn btn-ghost", style: "width:100%;margin-bottom:14px;", text: "⬇ バックアップを保存（JSON）", onclick: async () => { await exportJson(); } }),
+    syncEnabled ? el("label", { style: "display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.6;margin-bottom:12px;cursor:pointer;" }, [
+      wipeCloudCb,
+      el("span", {}, ["クラウドのバックアップも消去する", el("br"), el("span", { style: "color:var(--stone);font-size:11.5px;", text: "オフのまま消すと、クラウド側は残り「同期を再度ON」でいつでも復元できます（推奨）。" })]),
+    ]) : null,
     el("div", { class: "fld" }, [el("label", { text: "確認のため「削除」と入力", style: "color:var(--accent);" }), confirmInput]),
     el("div", { class: "modal-foot" }, [
       el("button", { class: "btn btn-ghost", text: "キャンセル", onclick: () => overlay.remove() }),
@@ -1238,7 +1468,7 @@ function openCompare() {
     ["サイト", (i) => i.site || i.domain || "—"],
     ["種別", (i) => SOURCE_LABEL[effectiveSource(i)]],
     ["価格", (i) => { const y = toJPY(i.price, i.currency, fx); return fmtPrice(i.price, i.currency) + (currencyCode(i.currency) !== "JPY" && y != null ? `（≈¥${y.toLocaleString()}）` : ""); }, true],
-    ["在庫", (i) => availLabel(i.availability)],
+    ["在庫", (i) => availLabel(effectiveAvailability(i)) + (i.sizePicked ? `（${i.sizePicked}）` : "")],
     ["サイズ", (i) => i.sizes || "—"],
     ["カテゴリ", (i) => [i.major, i.sub].filter(Boolean).join(" / ") || "—"],
     ["状態", (i) => i.status || "—"],
@@ -1267,7 +1497,7 @@ function openCompare() {
       list.forEach((i) => {
         const v = emOf(i)[f];
         if (v === "" || v == null) { tr.append(el("td", {}, ["—"])); return; }
-        const b = baseItemFor(i.major);
+        const b = baseItemFor(i);
         const bv = b ? Number(emOf(b)[f]) : NaN;
         let diffTxt = "";
         if (!isNaN(bv) && (!b || b.id !== i.id)) {
@@ -1391,7 +1621,141 @@ function openFxSettings() {
   overlay.append(modal); document.body.append(overlay);
 }
 
+/* ---------- cloud sync settings modal ---------- */
+function openSyncSettings() {
+  const overlay = el("div", { class: "overlay", onclick: (e) => { if (e.target === overlay) overlay.remove(); } });
+  const fmtTs = (ts) => (ts ? new Date(ts).toLocaleString("ja-JP") : "まだありません");
+  let draftToken = syncToken || genSyncToken(); // first open: generate & show immediately
+
+  const enabledCb = el("input", { type: "checkbox", style: "width:16px;height:16px;accent-color:var(--ink);flex:0 0 auto;cursor:pointer;" });
+  enabledCb.checked = syncEnabled;
+  const tokenI = el("input", { spellcheck: "false", autocapitalize: "off", autocorrect: "off", style: "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;" });
+  tokenI.value = draftToken;
+  tokenI.addEventListener("input", () => { draftToken = tokenI.value.trim(); });
+  const workerI = el("input", { placeholder: "https://xxxx.workers.dev", inputmode: "url" });
+  workerI.value = workerUrl || "";
+
+  const status = el("div", { style: "font-size:12px;color:var(--stone);line-height:1.8;border-top:1px dashed var(--line);padding-top:8px;margin-top:2px;" });
+  const renderStatus = () => {
+    status.innerHTML = "";
+    status.append(
+      el("div", { text: `最終プッシュ（この端末 → クラウド）: ${fmtTs(syncLastPush)}` }),
+      el("div", { text: `最終プル（クラウド → この端末）: ${fmtTs(syncLastPull)}` }),
+    );
+  };
+  renderStatus();
+
+  // persist the draft (token/URL/toggle); returns false when invalid
+  const save = async () => {
+    const wu = (workerI.value || "").trim();
+    if (enabledCb.checked) {
+      if (!validSyncToken(draftToken)) { alert("トークンは16文字以上の英数字・-・_ にしてください（「再生成」で作れます）。"); return false; }
+      if (!wu) { alert("Worker URL を入力してください。\n未作成なら worker/README.md（デプロイ約5分・無料）を参照。取得代行URLと同じもので構いません。"); return false; }
+    }
+    await setWorker(wu); workerUrl = wu;
+    await setSyncToken(draftToken); syncToken = draftToken;
+    await setSyncEnabled(enabledCb.checked); syncEnabled = enabledCb.checked;
+    return true;
+  };
+
+  const syncNowBtn = el("button", { class: "btn btn-ghost", text: "今すぐ同期", onclick: async () => {
+    if (!(await save())) return;
+    if (!syncEnabled) { alert("「クラウド同期を有効にする」を ON にしてから実行してください。"); return; }
+    syncNowBtn.disabled = true; syncNowBtn.textContent = "同期中…";
+    await syncNow();
+    syncLastPush = await getSyncLastPush(); syncLastPull = await getSyncLastPull();
+    renderStatus();
+    syncNowBtn.disabled = false; syncNowBtn.textContent = "今すぐ同期";
+  } });
+
+  // Disaster recovery: the worker keeps ONE previous snapshot (sync:<token>:prev,
+  // written before every overwrite). If the current cloud copy was ever buried by
+  // a bad push, this pulls the one-generation-back copy and merges it in.
+  const prevBtn = el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "1つ前のバックアップから復元", onclick: async () => {
+    if (!(await save())) return;
+    if (!validSyncToken(draftToken) || !workerUrl) { alert("トークンと Worker URL を設定してください。"); return; }
+    prevBtn.disabled = true; prevBtn.textContent = "取得中…";
+    try {
+      const r = await fetch(syncEndpoint(workerUrl, draftToken) + "&prev=1", { signal: AbortSignal.timeout(15000) });
+      if (r.status === 404) { alert("1つ前のバックアップはまだありません（上書きが1回も起きていません）。"); return; }
+      if (!r.ok) { alert("取得に失敗しました（HTTP " + r.status + "）。"); return; }
+      const parsed = await r.json();
+      const incoming = itemsFromParsed(parsed);
+      if (!confirm(`1つ前のバックアップ（${incoming.length} 件）を現在のデータに統合しますか？\n（同じ商品は上書きではなく統合され、消えません）`)) return;
+      syncApplying = true;
+      try {
+        const { items: merged, added, updated } = mergeImport(await getItems(), incoming);
+        await setItems(merged);
+        if (Array.isArray(parsed.outfits) && !(await getOutfits()).length) await setOutfits(parsed.outfits);
+        alert(`復元しました：追加 ${added} 件 / 更新 ${updated} 件`);
+      } finally { setTimeout(() => { syncApplying = false; }, 300); }
+      scheduleSyncPush(); // push the recovered union back to the cloud
+    } catch (e) {
+      alert("復元に失敗しました：" + (e && e.message ? e.message : String(e)));
+    } finally {
+      prevBtn.disabled = false; prevBtn.textContent = "1つ前のバックアップから復元";
+    }
+  } });
+
+  const modal = el("div", { class: "modal sm", onclick: (e) => e.stopPropagation() }, [
+    el("button", { class: "x", text: "×", onclick: () => overlay.remove() }),
+    el("h2", { class: "serif", text: "クラウド同期（自動バックアップ）" }),
+    el("div", { style: "font-size:12.5px;color:var(--stone);line-height:1.7;margin-bottom:12px;" }, [
+      "変更のたびに、あなた専用の Cloudflare Worker（無料枠）へ自動バックアップします。データが消えても次回起動時にクラウドから自動復元。",
+      el("br"),
+      el("b", { text: "PCとスマホで同じトークンを設定すると、同じデータに同期されます。" }),
+      el("br"),
+      "トークンは合言葉です。メモ帳などに控えておくと、端末を替えても復元できます。",
+    ]),
+    el("div", { class: "fld" }, [
+      el("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--ink);" }, [
+        enabledCb, el("b", { text: "クラウド同期を有効にする" }),
+      ]),
+    ]),
+    el("div", { class: "fld" }, [
+      el("label", { text: "同期トークン（別端末に貼り付けると同じデータに接続）" }),
+      tokenI,
+      el("div", { style: "display:flex;gap:6px;margin-top:6px;" }, [
+        el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "コピー", onclick: async () => {
+          try { await navigator.clipboard.writeText(draftToken); toast("トークンをコピーしました"); }
+          catch { tokenI.select(); document.execCommand && document.execCommand("copy"); toast("トークンをコピーしました"); }
+        } }),
+        el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "再生成", onclick: () => {
+          if (!confirm("トークンを作り直しますか？\n（他の端末は新しいトークンを設定し直すまで接続できなくなります）")) return;
+          draftToken = genSyncToken(); tokenI.value = draftToken;
+        } }),
+      ]),
+    ]),
+    el("div", { class: "fld" }, [
+      el("label", { text: "Worker URL（取得代行URLと共通）" }),
+      workerI,
+      el("div", { style: "font-size:11px;color:var(--stone);margin-top:4px;line-height:1.6;", text: "※ 同期には Worker 側で KV（EDIT_KV）の設定が必要です（worker/README.md 参照・無料）。" }),
+    ]),
+    status,
+    el("div", { style: "margin:2px 0 6px;" }, [prevBtn]),
+    el("div", { class: "modal-foot" }, [
+      syncNowBtn,
+      el("span", { style: "flex:1;" }),
+      el("button", { class: "btn btn-ghost", text: "キャンセル", onclick: () => overlay.remove() }),
+      el("button", { class: "btn btn-ink", text: "保存", onclick: async () => {
+        const wasOn = syncEnabled;
+        if (!(await save())) return;
+        overlay.remove();
+        await renderBackupNotice(); // ON なら手動バックアップのリマインドを畳む
+        if (syncEnabled && !wasOn) { toast("クラウド同期を開始します…"); syncBoot(); } // first ON: pull(復元)→push
+      } }),
+    ]),
+  ]);
+  overlay.append(modal); document.body.append(overlay);
+}
+
 /* ---------- boot ---------- */
-chrome.storage.onChanged.addListener((changes, area) => { if (area === "local") reload(); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  // schedule a cloud push only for real data changes (items/コーデ/基準/カテゴリ),
+  // never for sync bookkeeping, and never for changes we just pulled down
+  if (!syncApplying && changesNeedPush(Object.keys(changes || {}))) scheduleSyncPush();
+  reload();
+});
 buildShell();
-reload().then(() => { handleHashAdd(); handleShareParam(); });
+reload().then(async () => { await handleHashAdd(); handleShareParam(); syncBoot(); });

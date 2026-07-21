@@ -2,6 +2,18 @@
 // Backs chrome.storage.local with localStorage (persistent, per-origin) and
 // provides no-op tabs/runtime. Must load BEFORE popup.js (which reads chrome).
 window.__EDIT_WEB__ = true;
+// Ask the browser to make this origin's storage persistent. Without it,
+// Chrome (especially Android) may silently evict localStorage under storage
+// pressure — the suspected cause of a full favorites wipe on the PWA.
+// Best-effort: the result is only logged (denied is normal until the PWA is
+// installed / the site is "engaged" enough). Extension side doesn't need this
+// (chrome.storage.local is not subject to eviction).
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persisted()
+    .then((already) => (already ? true : navigator.storage.persist()))
+    .then((granted) => console.log("[EDIT] persistent storage: " + (granted ? "granted" : "not granted")))
+    .catch(() => {});
+}
 (function () {
   const NS = "edit_ls_";
   const listeners = [];

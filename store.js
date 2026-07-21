@@ -73,6 +73,113 @@ export const KEY_WORKER = "edit_worker_v1";
 export async function getWorker() { const r = await chrome.storage.local.get(KEY_WORKER); return (r[KEY_WORKER] || "").trim(); }
 export async function setWorker(u) { await chrome.storage.local.set({ [KEY_WORKER]: (u || "").trim() }); }
 
+/* ---------------- backup reminder（データ消失の再発防止） ---------------- */
+// The web/PWA build keeps everything in localStorage, which the browser may
+// evict (storage pressure / clearing site data) — a periodic JSON export is
+// the only real safety net. Track when the user last exported and until when
+// the reminder is snoozed. Plain string-keyed entries so they work through
+// both chrome.storage.local (拡張) and the localStorage shim (web).
+export const KEY_LAST_BACKUP = "edit_last_backup_v1";     // epoch ms of the last export
+export const KEY_BACKUP_SNOOZE = "edit_backup_snooze_v1"; // epoch ms until which the reminder is muted
+export async function getLastBackupAt() { const r = await chrome.storage.local.get(KEY_LAST_BACKUP); return Number(r[KEY_LAST_BACKUP]) || 0; }
+export async function setLastBackupAt(ts = Date.now()) { await chrome.storage.local.set({ [KEY_LAST_BACKUP]: ts }); }
+export async function getBackupSnoozeUntil() { const r = await chrome.storage.local.get(KEY_BACKUP_SNOOZE); return Number(r[KEY_BACKUP_SNOOZE]) || 0; }
+export async function setBackupSnoozeUntil(ts) { await chrome.storage.local.set({ [KEY_BACKUP_SNOOZE]: ts }); }
+
+export const BACKUP_REMIND_MIN_ITEMS = 10;   // don't nag while there is little to lose
+export const BACKUP_REMIND_AFTER_DAYS = 14;  // remind when the last export is older than this
+export const BACKUP_SNOOZE_DAYS = 7;         // 「後で」 mutes the banner this long
+// Pure decision (unit-testable): remind when there is enough data to lose AND
+// the last export is missing/stale AND the user hasn't snoozed. Cloud sync ON
+// (自動バックアップ) makes the manual-export nag pointless — never show then.
+// Returns { show, days } — days = full days since the last backup (null = never).
+export function backupReminderState(itemCount, lastBackupAt, snoozeUntil, now = Date.now(), syncEnabled = false) {
+  const last = Number(lastBackupAt) || 0;
+  const days = last > 0 ? Math.max(0, Math.floor((now - last) / 86400000)) : null;
+  const stale = last <= 0 || now - last >= BACKUP_REMIND_AFTER_DAYS * 86400000;
+  const show = !syncEnabled && (Number(itemCount) || 0) >= BACKUP_REMIND_MIN_ITEMS && stale && now >= (Number(snoozeUntil) || 0);
+  return { show, days };
+}
+
+/* ---------------- cloud sync（自動バックアップ・Cloudflare Worker KV） ---------------- */
+// Root fix for the PWA data-loss incident: every data change is pushed
+// (debounced) to the user's own Cloudflare Worker /sync endpoint (KV, 無料枠)
+// under a secret token; boot pulls & merges. Same token on PC and phone =
+// same cloud data ⇒ effective PC⇔スマホ sync. Plain string-keyed entries so
+// they work through chrome.storage.local (拡張) AND the localStorage shim (web).
+export const KEY_SYNC_ENABLED = "edit_sync_enabled_v1";
+export const KEY_SYNC_TOKEN = "edit_sync_token_v1";
+export const KEY_SYNC_LAST_PUSH = "edit_sync_last_push_v1"; // epoch ms of the last successful PUT
+export const KEY_SYNC_LAST_PULL = "edit_sync_last_pull_v1"; // epoch ms of the last successful GET+merge
+// KV free tier allows 1,000 writes/day; a 30s debounce over human editing
+// keeps personal use at a few dozen writes a day.
+export const SYNC_PUSH_DEBOUNCE_MS = 30000;
+
+export async function getSyncEnabled() { const r = await chrome.storage.local.get(KEY_SYNC_ENABLED); return !!r[KEY_SYNC_ENABLED]; }
+export async function setSyncEnabled(v) { await chrome.storage.local.set({ [KEY_SYNC_ENABLED]: !!v }); }
+export async function getSyncToken() { const r = await chrome.storage.local.get(KEY_SYNC_TOKEN); return String(r[KEY_SYNC_TOKEN] || "").trim(); }
+export async function setSyncToken(t) { await chrome.storage.local.set({ [KEY_SYNC_TOKEN]: String(t || "").trim() }); }
+export async function getSyncLastPush() { const r = await chrome.storage.local.get(KEY_SYNC_LAST_PUSH); return Number(r[KEY_SYNC_LAST_PUSH]) || 0; }
+export async function setSyncLastPush(ts = Date.now()) { await chrome.storage.local.set({ [KEY_SYNC_LAST_PUSH]: ts }); }
+export async function getSyncLastPull() { const r = await chrome.storage.local.get(KEY_SYNC_LAST_PULL); return Number(r[KEY_SYNC_LAST_PULL]) || 0; }
+export async function setSyncLastPull(ts = Date.now()) { await chrome.storage.local.set({ [KEY_SYNC_LAST_PULL]: ts }); }
+
+// Token contract — MUST mirror the worker's validSyncToken (worker/worker.js).
+export function validSyncToken(t) {
+  return /^[A-Za-z0-9_-]{16,}$/.test(String(t || ""));
+}
+
+// Unguessable device-pairing token: 22 chars over a 64-symbol URL-safe
+// alphabet (= 132 bits) via crypto.getRandomValues. `b & 63` is uniform
+// because the alphabet size divides 256.
+export function genSyncToken(len = 22) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const buf = new Uint8Array(len);
+  globalThis.crypto.getRandomValues(buf);
+  let s = "";
+  for (let i = 0; i < len; i++) s += alphabet[buf[i] & 63];
+  return s;
+}
+
+// Build the worker /sync URL (reuses the 取得代行 worker origin).
+export function syncEndpoint(workerUrl, token) {
+  const base = String(workerUrl || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  return base + "/sync?token=" + encodeURIComponent(String(token || "").trim());
+}
+
+// Which storage changes warrant a cloud push: the four data stores only.
+// Sync bookkeeping keys (last push/pull) must NOT re-trigger a push — that
+// would loop: push -> setSyncLastPush -> onChanged -> push …
+export function changesNeedPush(changedKeys) {
+  const watch = new Set([KEY, KEY_OUTFITS, KEY_BASES, KEY_CATEGORIES]);
+  return (changedKeys || []).some((k) => watch.has(k));
+}
+
+// After restoring a cloud backup on a device that already had items (e.g. the
+// first-run seed), mergeImport keeps the LOCAL id on a URL collision — so any
+// cloud base entry pointing at the cloud twin's id would dangle. Re-point each
+// base id to the merged item with the same normalized URL; entries that cannot
+// be resolved are dropped (a dangling base is invisible in the UI anyway).
+export function remapImportedBases(cloudBases, incoming, merged) {
+  const urlOfCloudId = new Map();
+  (Array.isArray(incoming) ? incoming : []).forEach((r) => {
+    if (r && r.id && r.url) urlOfCloudId.set(String(r.id), normUrl(String(r.url)));
+  });
+  const idByUrl = new Map();
+  (Array.isArray(merged) ? merged : []).forEach((i) => { const k = normUrl(i.url); if (k) idByUrl.set(k, i.id); });
+  const ids = new Set((Array.isArray(merged) ? merged : []).map((i) => i.id));
+  const out = {};
+  for (const k of Object.keys(cloudBases || {})) {
+    const cid = cloudBases[k];
+    if (ids.has(cid)) { out[k] = cid; continue; }
+    const u = urlOfCloudId.get(String(cid));
+    const nid = u ? idByUrl.get(u) : undefined;
+    if (nid) out[k] = nid;
+  }
+  return out;
+}
+
 // Normalize a currency symbol or code to a map key (e.g. "€"->"EUR").
 export function currencyCode(cur) {
   const m = { "¥": "JPY", "￥": "JPY", "$": "USD", "€": "EUR", "£": "GBP", "₩": "KRW" };
@@ -332,6 +439,12 @@ export async function addItem(data) {
   const idx = key ? items.findIndex((i) => normUrl(i.url) === key) : -1;
   if (idx >= 0) {
     const merged = { ...items[idx] };
+    // price change tracking (軸b): remember the previous price so the UI can
+    // show ▼値下げ/▲値上げ since the last capture
+    if (data.price && merged.price && data.price !== merged.price) {
+      merged.prevPrice = merged.price;
+      merged.prevPriceAt = Date.now();
+    }
     // refresh extracted fields, keep user-set status/note/category/tags
     for (const f of ["name", "price", "currency", "image", "brand", "site", "domain", "availability", "sizes", "color", "colors"]) {
       if (data[f]) merged[f] = data[f];
@@ -413,6 +526,8 @@ export function normalizeImported(raw) {
     measures: sanitizeMeasures(raw && raw.measures),
     measuresBySize: (raw && raw.measuresBySize && typeof raw.measuresBySize === "object") ? raw.measuresBySize : {},
     availBySize: (raw && raw.availBySize && typeof raw.availBySize === "object") ? raw.availBySize : {},
+    prevPrice: s(raw && raw.prevPrice).replace(/[^\d.]/g, ""),
+    prevPriceAt: Number(raw && raw.prevPriceAt) || 0,
     sizePicked: s(raw && raw.sizePicked),
     color: s(raw && raw.color),
     colors: s(raw && raw.colors),

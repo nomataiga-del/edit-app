@@ -27,6 +27,7 @@ body{
   .grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
   .scroll { flex: 1 1 auto; min-height: 0; padding: 10px 28px 28px; }
   .hdr, .filters, .cattabs, .meta { padding-left: 28px; padding-right: 28px; }
+  .notice { margin-left: 28px; margin-right: 28px; }
   .thumb { aspect-ratio: 1 / 1; } /* denser cards -> more rows visible */
   .hdr { padding-top: 10px; padding-bottom: 10px; }
 }
@@ -43,6 +44,11 @@ body{
 .btn-ink{background:var(--ink); color:var(--paper); padding:8px 15px; font-weight:500;}
 .btn-ghost{background:transparent; border:1px solid var(--line); color:var(--inkSoft); padding:7px 13px;}
 .btn:focus-visible, input:focus, select:focus{outline:2px solid var(--ink); outline-offset:2px;}
+
+/* backup reminder (non-intrusive banner under the header) */
+.notice{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 16px 0; padding:8px 12px; background:var(--card); border:1px solid var(--line); border-radius:11px; font-size:11.5px; color:var(--inkSoft);}
+.notice .notice-t{flex:1 1 220px; min-width:0; line-height:1.45;}
+.notice .notice-acts{display:flex; gap:6px; flex-wrap:wrap; margin-left:auto;}
 
 /* filter row */
 .filters{display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:10px 16px 4px;}
