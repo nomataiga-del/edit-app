@@ -1322,6 +1322,26 @@ async function handleHashAdd() {
   return false;
 }
 
+// 復元リンク: ?sync=<token>[&worker=<url>] — self-healing entry point. Opening it
+// on a wiped device re-provisions the sync config and the boot pull then restores
+// everything from the cloud. The credentials are stripped from the URL/history
+// immediately after being saved. (The link is produced by the sync settings modal;
+// the user keeps it in their notes — one tap undoes any browser storage wipe.)
+async function handleSyncRestoreParam() {
+  if (!window.__EDIT_WEB__) return false;
+  const p = new URLSearchParams(location.search);
+  const t = (p.get("sync") || "").trim();
+  if (!t || !validSyncToken(t)) return false;
+  const w = (p.get("worker") || "").trim();
+  await setSyncToken(t); syncToken = t;
+  if (/^https:\/\/\S+$/.test(w)) { await setWorker(w); workerUrl = w; }
+  await setSyncEnabled(true); syncEnabled = true;
+  p.delete("sync"); p.delete("worker");
+  history.replaceState(null, "", location.pathname + (p.toString() ? "?" + p.toString() : "") + location.hash);
+  toast("復元リンクを読み込みました。クラウドと同期します…");
+  return true;
+}
+
 // Web Share Target: the browser's "Share → EDIT" opens the app with the shared
 // url/text/title as query params. Auto-capture from it (Shopify -> full auto).
 function handleShareParam() {
@@ -1724,6 +1744,15 @@ function openSyncSettings() {
           if (!confirm("トークンを作り直しますか？\n（他の端末は新しいトークンを設定し直すまで接続できなくなります）")) return;
           draftToken = genSyncToken(); tokenI.value = draftToken;
         } }),
+        window.__EDIT_WEB__ ? el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "🔗 復元リンク", onclick: async () => {
+          draftToken = (tokenI.value || "").trim();
+          if (!validSyncToken(draftToken)) { alert("先にトークンを設定してください。"); return; }
+          const w = (workerI.value || "").trim();
+          if (!w) { alert("先に Worker URL を設定してください。"); return; }
+          const link = location.origin + location.pathname + "?sync=" + encodeURIComponent(draftToken) + "&worker=" + encodeURIComponent(w);
+          try { await navigator.clipboard.writeText(link); } catch { prompt("このリンクをコピーしてください：", link); }
+          alert("復元リンクをコピーしました。Obsidianやメモ帳に貼って保存してください。\n\nもしまたデータが消えても、このリンクを開くだけで設定もデータも全部戻ります。");
+        } }) : null,
       ]),
     ]),
     el("div", { class: "fld" }, [
@@ -1733,6 +1762,32 @@ function openSyncSettings() {
     ]),
     status,
     el("div", { style: "margin:2px 0 6px;" }, [prevBtn]),
+    // 環境診断: なぜ消えるのかを1画面で特定するための情報（Web/PWAのみ）
+    window.__EDIT_WEB__ ? (() => {
+      const diag = el("div", { style: "font-size:11px;color:var(--stone);line-height:1.8;background:var(--paper);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:4px 0 8px;white-space:pre-wrap;", text: "環境情報を取得中…" });
+      (async () => {
+        try {
+          const ua = navigator.userAgent || "";
+          const env = /; wv\)/.test(ua) ? "アプリ内ブラウザ(WebView)⚠️" :
+            /SamsungBrowser/i.test(ua) ? "Samsung Internet" :
+            /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" :
+            /Safari\//.test(ua) ? "Safari" : "不明";
+          const standalone = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
+          let persisted = null, usage = null, quota = null;
+          if (navigator.storage) {
+            if (navigator.storage.persist) { try { persisted = (await navigator.storage.persisted()) || (await navigator.storage.persist()); } catch { /* ignore */ } }
+            if (navigator.storage.estimate) { try { const e = await navigator.storage.estimate(); usage = e.usage; quota = e.quota; } catch { /* ignore */ } }
+          }
+          const mb = (n) => n == null ? "?" : (n < 1048576 ? Math.round(n / 1024) + "KB" : Math.round(n / 1048576) + "MB");
+          let t = `実行環境: ${env}${standalone ? "（ホーム画面アプリ✓）" : "（ブラウザタブ）"}\n` +
+            `保存の保護: ${persisted === true ? "許可✓" : persisted === false ? "未許可⚠️（ブラウザの自動整理で消される可能性）" : "確認不可"}\n` +
+            `使用容量: ${mb(usage)} / 空き上限 ${mb(quota)}`;
+          if (persisted === false || !standalone) t += `\n→ 対策: Chromeメニュー⋮→「ホーム画面に追加/アプリをインストール」をして、そのアイコンから起動すると保護されやすくなります。`;
+          diag.textContent = t;
+        } catch (e) { diag.textContent = "環境情報の取得に失敗: " + (e && e.message ? e.message : e); }
+      })();
+      return diag;
+    })() : null,
     el("div", { class: "modal-foot" }, [
       syncNowBtn,
       el("span", { style: "flex:1;" }),
@@ -1758,4 +1813,4 @@ chrome.storage.onChanged.addListener((changes, area) => {
   reload();
 });
 buildShell();
-reload().then(async () => { await handleHashAdd(); handleShareParam(); syncBoot(); });
+reload().then(async () => { await handleSyncRestoreParam(); await handleHashAdd(); handleShareParam(); syncBoot(); });
