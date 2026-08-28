@@ -466,9 +466,18 @@ function renderGrid() {
     refs.scroll.append(el("div", { class: "empty" }, [
       el("div", { class: "t serif", text: "まだ何も掛かっていません" }),
       el("div", { text: window.__EDIT_WEB__
-        ? "スマホでは、⋯→「ブックマークレット設定」で取り込み用ボタンを登録 → 商品ページでそれをタップすると追加されます。上の「＋ 追加」から手入力もできます。"
+        ? "共有→EDIT か、上の「＋ 追加」で商品を登録できます。"
         : "気になった商品ページで、右下の「♥ EDITに追加」を押すか、上の「＋ このページを追加」で登録できます。名前・価格・画像・サイト名は自動で読み取ります。",
         style: "max-width:440px;margin:0 auto;line-height:1.7;font-size:13px;" }),
+      // Wipe recovery entry point: after a storage wipe the app boots looking
+      // empty with no token — point straight at the restore path (web only).
+      (window.__EDIT_WEB__ && !syncEnabled) ? el("div", { style: "max-width:440px;margin:14px auto 0;padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:var(--card);font-size:12.5px;line-height:1.7;text-align:left;" }, [
+        el("b", { text: "以前のデータがある場合" }), el("br"),
+        "データが消えてしまった時は、メモに保存した「復元リンク」を開くか、下からトークンを入力すると全て戻ります。",
+        el("div", { style: "margin-top:8px;" }, [
+          el("button", { class: "btn btn-ghost", style: "font-size:12.5px;", text: "クラウドから復元（トークン入力）", onclick: () => openSyncSettings() }),
+        ]),
+      ]) : null,
     ]));
     return;
   }
