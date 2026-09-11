@@ -40,6 +40,10 @@ let cats = defaultCategories(); // user-customizable category config
 let bases = {};                 // { [major]: itemId } base garment per major
 let fx = defaultFx();           // manual FX rates (yen per unit)
 let workerUrl = "";             // optional extract-proxy for non-Shopify (mobile)
+// The owner's own worker, baked in as the web default so a storage wipe can't
+// take the endpoint down with it (it is public infrastructure, not a secret).
+// For a future multi-user release, ship "" and let each user set their own.
+const DEFAULT_WORKER = "https://fragrant-dust-0d49.noma-taiga.workers.dev";
 // クラウド同期（自動バックアップ）state — loaded in reload(), driven by the sync block below
 let syncEnabled = false, syncToken = "", syncLastPush = 0, syncLastPull = 0;
 let viewMode = "items"; // "items" | "outfits"
@@ -775,7 +779,8 @@ async function reload() {
   }
   if (basesChanged) await setBases(bases);
   fx = await getFx();
-  workerUrl = await getWorker();
+  // web: fall back to the baked-in default so extraction+sync survive a wipe
+  workerUrl = (await getWorker()) || (window.__EDIT_WEB__ ? DEFAULT_WORKER : "");
   syncEnabled = await getSyncEnabled();
   syncToken = await getSyncToken();
   syncLastPush = await getSyncLastPush();
@@ -922,7 +927,9 @@ async function syncPushNow({ interactive = false } = {}) {
       if (bare && !(await getSyncLastPull())) return false;
     }
     const body = JSON.stringify(envData);
-    const opts = { method: "PUT", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(15000) };
+    // credentials: the worker remembers the token in a cookie on ITS domain,
+    // enabling /whoami zero-touch recovery after the app origin is wiped
+    const opts = { method: "PUT", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(15000), credentials: "include" };
     // keepalive lets the final tab-hide push survive page close, but browsers
     // cap keepalive bodies (~64KB) — only request it for small payloads.
     if (body.length < 60000) opts.keepalive = true;
@@ -962,7 +969,7 @@ async function syncPullMerge({ notify = false } = {}) {
   if (!syncReady()) return "off";
   let parsed;
   try {
-    const r = await fetch(syncEndpoint(workerUrl, syncToken), { signal: AbortSignal.timeout(15000) });
+    const r = await fetch(syncEndpoint(workerUrl, syncToken), { signal: AbortSignal.timeout(15000), credentials: "include" });
     if (r.status === 404) return "empty"; // nothing uploaded under this token yet
     if (!r.ok) return "error";
     parsed = await r.json();
@@ -997,6 +1004,25 @@ async function syncPullMerge({ notify = false } = {}) {
     // pull itself never schedules a redundant re-push
     setTimeout(() => { syncApplying = false; }, 300);
   }
+}
+
+// Zero-touch recovery after a FULL storage wipe: the sync token normally dies
+// with the wiped origin, but the worker also remembers it in a cookie on its
+// own domain (set on every /sync call). If we boot with no token, ask /whoami —
+// on a hit, re-provision and let syncBoot pull everything back. No user action.
+async function syncAutoRecover() {
+  if (!window.__EDIT_WEB__ || syncToken || !workerUrl) return false;
+  try {
+    const r = await fetch(workerUrl.replace(/\/$/, "") + "/whoami", { credentials: "include", signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return false;
+    const d = await r.json();
+    if (!d || !validSyncToken(d.token)) return false;
+    await setSyncToken(d.token); syncToken = d.token;
+    await setSyncEnabled(true); syncEnabled = true;
+    await setWorker(workerUrl);
+    toast("クラウド同期を自動復旧しました");
+    return true;
+  } catch { return false; }
 }
 
 // Boot / 同期ON: pull first, then push so both sides converge.
@@ -1285,7 +1311,7 @@ function openDangerZone() {
         await fetch(syncEndpoint(workerUrl, syncToken) + "&force=1", {
           method: "PUT", headers: { "content-type": "application/json" },
           body: JSON.stringify(toExport([], { outfits: [], bases: {}, categories: [] })),
-          signal: AbortSignal.timeout(15000),
+          signal: AbortSignal.timeout(15000), credentials: "include",
         });
       } catch { /* cloud wipe is best-effort; guard would reject later empty pushes anyway */ }
     }
@@ -1705,7 +1731,7 @@ function openSyncSettings() {
     if (!validSyncToken(draftToken) || !workerUrl) { alert("トークンと Worker URL を設定してください。"); return; }
     prevBtn.disabled = true; prevBtn.textContent = "取得中…";
     try {
-      const r = await fetch(syncEndpoint(workerUrl, draftToken) + "&prev=1", { signal: AbortSignal.timeout(15000) });
+      const r = await fetch(syncEndpoint(workerUrl, draftToken) + "&prev=1", { signal: AbortSignal.timeout(15000), credentials: "include" });
       if (r.status === 404) { alert("1つ前のバックアップはまだありません（上書きが1回も起きていません）。"); return; }
       if (!r.ok) { alert("取得に失敗しました（HTTP " + r.status + "）。"); return; }
       const parsed = await r.json();
@@ -1822,4 +1848,4 @@ chrome.storage.onChanged.addListener((changes, area) => {
   reload();
 });
 buildShell();
-reload().then(async () => { await handleSyncRestoreParam(); await handleHashAdd(); handleShareParam(); syncBoot(); });
+reload().then(async () => { await handleSyncRestoreParam(); await syncAutoRecover(); await handleHashAdd(); handleShareParam(); syncBoot(); });
