@@ -908,6 +908,18 @@ let syncApplying = false;   // applying cloud data locally — don't re-push wha
 
 function syncReady() { return syncEnabled && validSyncToken(syncToken) && !!workerUrl; }
 
+// Sync requests carry credentials so the worker can plant/read its token cookie
+// (zero-touch recovery). If a credentialed request is blocked (e.g. an older
+// worker without credential-capable CORS -> TypeError "Failed to fetch"), retry
+// without credentials so syncing itself never breaks — only the cookie is skipped.
+async function syncFetch(url, opts = {}) {
+  try { return await fetch(url, { ...opts, credentials: "include" }); }
+  catch (e) {
+    if (!(e instanceof TypeError)) throw e;
+    return fetch(url, { ...opts, credentials: "omit" });
+  }
+}
+
 async function fullExportEnvelope() {
   return toExport(await getItems(), { outfits: await getOutfits(), bases: await getBases(), categories: await getCategories() });
 }
@@ -929,11 +941,11 @@ async function syncPushNow({ interactive = false } = {}) {
     const body = JSON.stringify(envData);
     // credentials: the worker remembers the token in a cookie on ITS domain,
     // enabling /whoami zero-touch recovery after the app origin is wiped
-    const opts = { method: "PUT", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(15000), credentials: "include" };
+    const opts = { method: "PUT", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(15000) };
     // keepalive lets the final tab-hide push survive page close, but browsers
     // cap keepalive bodies (~64KB) — only request it for small payloads.
     if (body.length < 60000) opts.keepalive = true;
-    const r = await fetch(syncEndpoint(workerUrl, syncToken), opts);
+    const r = await syncFetch(syncEndpoint(workerUrl, syncToken), opts);
     if (!r.ok) {
       if (interactive) {
         let msg = "HTTP " + r.status;
@@ -969,7 +981,7 @@ async function syncPullMerge({ notify = false } = {}) {
   if (!syncReady()) return "off";
   let parsed;
   try {
-    const r = await fetch(syncEndpoint(workerUrl, syncToken), { signal: AbortSignal.timeout(15000), credentials: "include" });
+    const r = await syncFetch(syncEndpoint(workerUrl, syncToken), { signal: AbortSignal.timeout(15000) });
     if (r.status === 404) return "empty"; // nothing uploaded under this token yet
     if (!r.ok) return "error";
     parsed = await r.json();
@@ -1308,10 +1320,10 @@ function openDangerZone() {
     if (wipeCloud) {
       // explicit cloud wipe: force past the worker's shrink guard
       try {
-        await fetch(syncEndpoint(workerUrl, syncToken) + "&force=1", {
+        await syncFetch(syncEndpoint(workerUrl, syncToken) + "&force=1", {
           method: "PUT", headers: { "content-type": "application/json" },
           body: JSON.stringify(toExport([], { outfits: [], bases: {}, categories: [] })),
-          signal: AbortSignal.timeout(15000), credentials: "include",
+          signal: AbortSignal.timeout(15000),
         });
       } catch { /* cloud wipe is best-effort; guard would reject later empty pushes anyway */ }
     }
@@ -1731,7 +1743,7 @@ function openSyncSettings() {
     if (!validSyncToken(draftToken) || !workerUrl) { alert("トークンと Worker URL を設定してください。"); return; }
     prevBtn.disabled = true; prevBtn.textContent = "取得中…";
     try {
-      const r = await fetch(syncEndpoint(workerUrl, draftToken) + "&prev=1", { signal: AbortSignal.timeout(15000), credentials: "include" });
+      const r = await syncFetch(syncEndpoint(workerUrl, draftToken) + "&prev=1", { signal: AbortSignal.timeout(15000) });
       if (r.status === 404) { alert("1つ前のバックアップはまだありません（上書きが1回も起きていません）。"); return; }
       if (!r.ok) { alert("取得に失敗しました（HTTP " + r.status + "）。"); return; }
       const parsed = await r.json();
