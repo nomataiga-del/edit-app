@@ -497,6 +497,7 @@ export function toExport(items, extras = {}) {
   if (Array.isArray(extras.outfits)) env.outfits = extras.outfits;
   if (extras.bases && typeof extras.bases === "object") env.bases = extras.bases;
   if (Array.isArray(extras.categories)) env.categories = extras.categories;
+  if (Array.isArray(extras.diag) && extras.diag.length) env.diag = extras.diag; // wipe forensics (web)
   return env;
 }
 
