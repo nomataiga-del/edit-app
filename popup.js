@@ -44,7 +44,6 @@ let workerUrl = "";             // optional extract-proxy for non-Shopify (mobil
 // take the endpoint down with it (it is public infrastructure, not a secret).
 // For a future multi-user release, ship "" and let each user set their own.
 const DEFAULT_WORKER = "https://fragrant-dust-0d49.noma-taiga.workers.dev";
-let deviceFp = ""; // stable per-device hash (deviceFingerprint) — lets the worker recognise this phone
 // クラウド同期（自動バックアップ）state — loaded in reload(), driven by the sync block below
 let syncEnabled = false, syncToken = "", syncLastPush = 0, syncLastPull = 0;
 let viewMode = "items"; // "items" | "outfits"
@@ -921,25 +920,6 @@ async function syncFetch(url, opts = {}) {
   }
 }
 
-/* ---------- device identity（端末そのものを鍵にした自動復旧） ----------
-   A stable hash of coarse hardware/locale traits. The worker maps it to the sync
-   token, so a device whose browser storage AND cookies were wiped — or a
-   different browser context on the same phone — still gets its token back on
-   boot. Trade-off (disclosed in the modal): a different phone with identical
-   traits opening this app URL could be recognised as this device. */
-async function deviceFingerprint() {
-  try {
-    const n = window.navigator, s = window.screen;
-    const w = Math.min(s.width || 0, s.height || 0), h = Math.max(s.width || 0, s.height || 0); // orientation-proof
-    const tz = (Intl.DateTimeFormat().resolvedOptions() || {}).timeZone || "";
-    const parts = ["edit-fp-v1", n.platform || "", n.language || "", tz, w + "x" + h, window.devicePixelRatio || 1,
-      n.hardwareConcurrency || 0, n.deviceMemory || 0, n.maxTouchPoints || 0].join("|");
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(parts));
-    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 40);
-  } catch { return ""; }
-}
-function withFp(url) { return deviceFp ? url + (url.includes("?") ? "&" : "?") + "fp=" + deviceFp : url; }
-
 /* ---------- wipe forensics（なぜ消えたかを次回に特定する） ----------
    An install id is written to 4 places (localStorage / IndexedDB / CacheStorage /
    a cookie on this origin). On boot we check which survived: the pattern tells
@@ -1018,7 +998,7 @@ async function syncPushNow({ interactive = false } = {}) {
     // keepalive lets the final tab-hide push survive page close, but browsers
     // cap keepalive bodies (~64KB) — only request it for small payloads.
     if (body.length < 60000) opts.keepalive = true;
-    const r = await syncFetch(withFp(syncEndpoint(workerUrl, syncToken)), opts);
+    const r = await syncFetch(syncEndpoint(workerUrl, syncToken), opts);
     if (!r.ok) {
       if (interactive) {
         let msg = "HTTP " + r.status;
@@ -1054,7 +1034,7 @@ async function syncPullMerge({ notify = false } = {}) {
   if (!syncReady()) return "off";
   let parsed;
   try {
-    const r = await syncFetch(withFp(syncEndpoint(workerUrl, syncToken)), { signal: AbortSignal.timeout(15000) });
+    const r = await syncFetch(syncEndpoint(workerUrl, syncToken), { signal: AbortSignal.timeout(15000) });
     if (r.status === 404) return "empty"; // nothing uploaded under this token yet
     if (!r.ok) return "error";
     parsed = await r.json();
@@ -1098,7 +1078,7 @@ async function syncPullMerge({ notify = false } = {}) {
 async function syncAutoRecover() {
   if (!window.__EDIT_WEB__ || syncToken || !workerUrl) return false;
   try {
-    const r = await fetch(withFp(workerUrl.replace(/\/$/, "") + "/whoami"), { credentials: "include", signal: AbortSignal.timeout(8000) });
+    const r = await fetch(workerUrl.replace(/\/$/, "") + "/whoami", { credentials: "include", signal: AbortSignal.timeout(8000) });
     if (!r.ok) return false;
     const d = await r.json();
     if (!d || !validSyncToken(d.token)) return false;
@@ -1393,7 +1373,7 @@ function openDangerZone() {
     if (wipeCloud) {
       // explicit cloud wipe: force past the worker's shrink guard
       try {
-        await syncFetch(withFp(syncEndpoint(workerUrl, syncToken) + "&force=1"), {
+        await syncFetch(syncEndpoint(workerUrl, syncToken) + "&force=1", {
           method: "PUT", headers: { "content-type": "application/json" },
           body: JSON.stringify(toExport([], { outfits: [], bases: {}, categories: [] })),
           signal: AbortSignal.timeout(15000),
@@ -1816,7 +1796,7 @@ function openSyncSettings() {
     if (!validSyncToken(draftToken) || !workerUrl) { alert("トークンと Worker URL を設定してください。"); return; }
     prevBtn.disabled = true; prevBtn.textContent = "取得中…";
     try {
-      const r = await syncFetch(withFp(syncEndpoint(workerUrl, draftToken) + "&prev=1"), { signal: AbortSignal.timeout(15000) });
+      const r = await syncFetch(syncEndpoint(workerUrl, draftToken) + "&prev=1", { signal: AbortSignal.timeout(15000) });
       if (r.status === 404) { alert("1つ前のバックアップはまだありません（上書きが1回も起きていません）。"); return; }
       if (!r.ok) { alert("取得に失敗しました（HTTP " + r.status + "）。"); return; }
       const parsed = await r.json();
@@ -1846,7 +1826,7 @@ function openSyncSettings() {
       el("b", { text: "PCとスマホで同じトークンを設定すると、同じデータに同期されます。" }),
       el("br"),
       "トークンは合言葉です。メモ帳などに控えておくと、端末を替えても復元できます。",
-      window.__EDIT_WEB__ ? el("span", {}, [el("br"), "この端末は機種情報で自動認識され、データが消えても開くだけで復旧します（同じ機種・設定の別端末でこのURLを開くと同一視される可能性があります）。"]) : null,
+      window.__EDIT_WEB__ ? el("span", {}, [el("br"), el("b", { text: "おすすめ：下の「📱 ホーム画面に復元アイコン」を1回だけ設定" }), " — ブラウザのデータが全部消えても、そのアイコンを1タップすれば設定ごと元に戻ります。"]) : null,
     ]),
     el("div", { class: "fld" }, [
       el("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--ink);" }, [
@@ -1865,6 +1845,18 @@ function openSyncSettings() {
           if (!confirm("トークンを作り直しますか？\n（他の端末は新しいトークンを設定し直すまで接続できなくなります）")) return;
           draftToken = genSyncToken(); tokenI.value = draftToken;
         } }),
+        window.__EDIT_WEB__ ? el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "📱 ホーム画面に復元アイコン", onclick: async () => {
+          draftToken = (tokenI.value || "").trim();
+          if (!validSyncToken(draftToken)) { alert("先にトークンを設定してください。"); return; }
+          const w = (workerI.value || "").trim();
+          if (!w) { alert("先に Worker URL を設定してください。"); return; }
+          // A manifest-free page: Chrome's「ホーム画面に追加」turns it into a plain shortcut
+          // that keeps the URL (and so the restore key) on the launcher — outside the browser.
+          const base = location.origin + location.pathname.replace(/[^/]*$/, "");
+          const url = base + "restore.html?sync=" + encodeURIComponent(draftToken) + "&worker=" + encodeURIComponent(w);
+          const win = window.open(url, "_blank");
+          if (!win) { try { await navigator.clipboard.writeText(url); } catch { /* ignore */ } alert("復元ページのURLをコピーしました。Chromeで開き、メニュー⋮→「ホーム画面に追加」してください。"); }
+        } }) : null,
         window.__EDIT_WEB__ ? el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "🔗 復元リンク", onclick: async () => {
           draftToken = (tokenI.value || "").trim();
           if (!validSyncToken(draftToken)) { alert("先にトークンを設定してください。"); return; }
@@ -1904,7 +1896,6 @@ function openSyncSettings() {
             `保存の保護: ${persisted === true ? "許可✓" : persisted === false ? "未許可⚠️（ブラウザの自動整理で消される可能性）" : "確認不可"}\n` +
             `使用容量: ${mb(usage)} / 空き上限 ${mb(quota)}`;
           if (persisted === false || !standalone) t += `\n→ 対策: Chromeメニュー⋮→「ホーム画面に追加/アプリをインストール」をして、そのアイコンから起動すると保護されやすくなります。`;
-          if (deviceFp) t += `\n端末ID: ${deviceFp.slice(0, 12)}…`;
           const flog = forensicsLog();
           if (flog.length) t += "\n\n直近のリセット検知:\n" + flog.slice(-3).map((e) => `${String(e.at || "").slice(0, 16).replace("T", " ")} [${e.kind}] ${e.hint}${e.survived && e.survived.length ? "（残存: " + e.survived.join(",") + "）" : ""}`).join("\n");
           diag.textContent = t;
@@ -1939,7 +1930,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
 buildShell();
 // Exposed so tests (and debugging) can await the full boot chain.
 window.__EDIT_BOOT__ = reload().then(async () => {
-  deviceFp = await deviceFingerprint();
   const scan = await forensicsScan();
   await handleSyncRestoreParam();
   const recovered = await syncAutoRecover();
