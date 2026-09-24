@@ -141,6 +141,33 @@ export function genSyncToken(len = 22) {
   return s;
 }
 
+/* ---------------- account = 合言葉（passphrase）login ----------------
+   The sync key is DERIVED from a user-chosen passphrase (PBKDF2-SHA256, fixed
+   salt, base64url) so the "account" is something the user remembers — no random
+   token to copy around. Legacy random tokens (pre-1.2) still work as-is. */
+export const KEY_SYNC_PASS = "edit_sync_pass_v1";   // the passphrase itself (shown on request, reused locally)
+export const KEY_LOGIN_SKIP = "edit_login_skip_v1"; // user chose「あとで」on the web login gate
+export const PASSPHRASE_MIN = 8;
+export async function getSyncPass() { const r = await chrome.storage.local.get(KEY_SYNC_PASS); return String(r[KEY_SYNC_PASS] || ""); }
+export async function setSyncPass(p) { await chrome.storage.local.set({ [KEY_SYNC_PASS]: String(p || "") }); }
+export async function getLoginSkip() { const r = await chrome.storage.local.get(KEY_LOGIN_SKIP); return !!r[KEY_LOGIN_SKIP]; }
+export async function setLoginSkip(v) { await chrome.storage.local.set({ [KEY_LOGIN_SKIP]: !!v }); }
+// NFKC + trim + single spaces, so 「青い　傘」 and "青い 傘" are the same account.
+export function normalizePassphrase(p) { return String(p || "").normalize("NFKC").trim().replace(/\s+/g, " "); }
+// A pre-1.2 random token (16+ url-safe chars, no spaces) — accepted verbatim.
+export function isLegacyToken(s) { return /^[A-Za-z0-9_-]{16,}$/.test(String(s || "").trim()); }
+// passphrase -> sync key. PBKDF2 (120k iters) so guessing weak phrases against
+// the worker is slow; output is base64url (43 chars) = a valid sync token.
+export async function deriveSyncKey(passphrase) {
+  const norm = normalizePassphrase(passphrase);
+  if (norm.length < PASSPHRASE_MIN) throw new Error("passphrase too short");
+  const enc = new TextEncoder();
+  const km = await globalThis.crypto.subtle.importKey("raw", enc.encode(norm), "PBKDF2", false, ["deriveBits"]);
+  const bits = await globalThis.crypto.subtle.deriveBits({ name: "PBKDF2", salt: enc.encode("edit-sync-v1"), iterations: 120000, hash: "SHA-256" }, km, 256);
+  let bin = ""; for (const b of new Uint8Array(bits)) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 // Build the worker /sync URL (reuses the 取得代行 worker origin).
 export function syncEndpoint(workerUrl, token) {
   const base = String(workerUrl || "").trim().replace(/\/+$/, "");

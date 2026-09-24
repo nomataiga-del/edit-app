@@ -14,8 +14,9 @@ import {
   backupReminderState, BACKUP_SNOOZE_DAYS,
   getSyncEnabled, setSyncEnabled, getSyncToken, setSyncToken,
   getSyncLastPush, setSyncLastPush, getSyncLastPull, setSyncLastPull,
-  validSyncToken, genSyncToken, syncEndpoint, changesNeedPush, remapImportedBases,
+  validSyncToken, syncEndpoint, changesNeedPush, remapImportedBases,
   SYNC_PUSH_DEBOUNCE_MS,
+  getSyncPass, setSyncPass, getLoginSkip, setLoginSkip, deriveSyncKey, normalizePassphrase, PASSPHRASE_MIN,
 } from "./store.js";
 import { extractProduct, DOMAIN_RULES, shopifyProductJsonUrl, shopifyFromJson, guessCategory } from "./extract.js";
 
@@ -46,6 +47,7 @@ let workerUrl = "";             // optional extract-proxy for non-Shopify (mobil
 const DEFAULT_WORKER = "https://fragrant-dust-0d49.noma-taiga.workers.dev";
 // クラウド同期（自動バックアップ）state — loaded in reload(), driven by the sync block below
 let syncEnabled = false, syncToken = "", syncLastPush = 0, syncLastPull = 0;
+let syncPass = "", loginSkip = false; // 合言葉（この端末の控え）/ web のログイン画面を「あとで」にした
 let viewMode = "items"; // "items" | "outfits"
 let query = "", fSite = "すべて", fStatus = "すべて", fMajor = "すべて", fSub = "すべて", sort = "new";
 let fOfficialOnly = false; // 軸a: show only brand-official (non-marketplace) items
@@ -105,7 +107,7 @@ function buildShell() {
     el("button", { class: "btn", style: miStyle, text: "カテゴリ設定", onclick: () => { menu.classList.remove("open"); openCategorySettings(); } }),
     el("button", { class: "btn", style: miStyle, text: "為替レート設定", onclick: () => { menu.classList.remove("open"); openFxSettings(); } }),
     el("button", { class: "btn", style: miStyle, text: "取得代行URLを設定", onclick: async () => { menu.classList.remove("open"); const cur = await getWorker(); const v = prompt("取得代行(Cloudflare Worker)のURL\n例: https://edit-extract.xxxx.workers.dev\n（空欄で無効化）", cur || ""); if (v !== null) { await setWorker(v); workerUrl = v.trim(); alert(v.trim() ? "設定しました。非Shopifyサイトも 共有→自動取得 を試します。" : "取得代行を無効化しました。"); } } }),
-    el("button", { class: "btn", style: miStyle, text: "クラウド同期（自動バックアップ）", onclick: () => { menu.classList.remove("open"); openSyncSettings(); } }),
+    el("button", { class: "btn", style: miStyle, text: "アカウント（同期・ログイン）", onclick: () => { menu.classList.remove("open"); openSyncSettings(); } }),
     window.__EDIT_WEB__ ? el("button", { class: "btn", style: miStyle, text: "ブックマークレット設定", onclick: () => { menu.classList.remove("open"); openBookmarkletHelp(); } }) : null,
     el("div", { style: "height:1px;background:var(--line);margin:5px 3px;" }),
     el("button", { class: "btn", style: miStyle, text: "エクスポート（JSON）", onclick: async () => { await exportJson(); menu.classList.remove("open"); } }),
@@ -473,13 +475,12 @@ function renderGrid() {
         ? "共有→EDIT か、上の「＋ 追加」で商品を登録できます。"
         : "気になった商品ページで、右下の「♥ EDITに追加」を押すか、上の「＋ このページを追加」で登録できます。名前・価格・画像・サイト名は自動で読み取ります。",
         style: "max-width:440px;margin:0 auto;line-height:1.7;font-size:13px;" }),
-      // Wipe recovery entry point: after a storage wipe the app boots looking
-      // empty with no token — point straight at the restore path (web only).
-      (window.__EDIT_WEB__ && !syncEnabled) ? el("div", { style: "max-width:440px;margin:14px auto 0;padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:var(--card);font-size:12.5px;line-height:1.7;text-align:left;" }, [
-        el("b", { text: "以前のデータがある場合" }), el("br"),
-        "データが消えてしまった時は、メモに保存した「復元リンク」を開くか、下からトークンを入力すると全て戻ります。",
+      // Not logged in on the web: the cloud copy (if any) comes back on login.
+      (window.__EDIT_WEB__ && !loggedIn()) ? el("div", { style: "max-width:440px;margin:14px auto 0;padding:10px 12px;border:1px solid var(--line);border-radius:11px;background:var(--card);font-size:12.5px;line-height:1.7;text-align:left;" }, [
+        el("b", { text: "ログインしていません" }), el("br"),
+        "合言葉でログインすると、お気に入りがクラウドに保存され、端末のデータが消えても戻ります。",
         el("div", { style: "margin-top:8px;" }, [
-          el("button", { class: "btn btn-ghost", style: "font-size:12.5px;", text: "クラウドから復元（トークン入力）", onclick: () => openSyncSettings() }),
+          el("button", { class: "btn btn-ink", style: "font-size:12.5px;", text: "ログイン（合言葉を入力）", onclick: () => showLoginGate() }),
         ]),
       ]) : null,
     ]));
@@ -761,11 +762,12 @@ function update() {
 async function reload() {
   await ensureSeeded();
   const raw = await getItems();
-  items = raw.map(migrateItemCategory).map((it) => {
+  const mapped = raw.map(migrateItemCategory).map((it) => {
     if (it.major) return it; // already classified
     const g = guessCategory([it.name, it.sub, it.brand].join(" ")); // auto-classify existing 未分類 by name
     return g.major ? { ...it, major: g.major, sub: it.sub || g.sub } : it;
   });
+  items = mapped;
   outfits = await getOutfits();
   cats = await getCategories();
   bases = await getBases();
@@ -785,9 +787,13 @@ async function reload() {
   syncToken = await getSyncToken();
   syncLastPush = await getSyncLastPush();
   syncLastPull = await getSyncLastPull();
+  syncPass = await getSyncPass(); loginSkip = await getLoginSkip();
   // persist one-time category migration (idempotent on subsequent loads)
-  const changed = items.some((it, i) => it.major !== raw[i].major || it.sub !== raw[i].sub);
-  if (changed) await setItems(items);
+  // Compare THIS call's snapshot (not the shared `items`): storage events fire
+  // mid-await, so a concurrent reload() may already have replaced `items` with
+  // a longer array (first-run seed flag -> items), which used to throw here.
+  const changed = mapped.some((it, i) => it.major !== raw[i].major || it.sub !== raw[i].sub);
+  if (changed) await setItems(mapped);
   update();
   await renderBackupNotice();
 }
@@ -970,7 +976,7 @@ function forensicsRecord(scan, knownToCloud) {
   };
   const log = forensicsLog(); log.push(ev);
   try { localStorage.setItem(FORENSICS_KEY, JSON.stringify(log.slice(-10))); } catch { /* ignore */ }
-  if (kind !== "fresh") toast("⚠️ 端末の保存データがリセットされていました（詳細は ⋯→クラウド同期）");
+  if (kind !== "fresh") toast("⚠️ 端末の保存データがリセットされていました（詳細は ⋯→アカウント）");
 }
 
 async function fullExportEnvelope() {
@@ -1030,7 +1036,7 @@ function scheduleSyncPush() {
 //   empty local + cloud data  -> full restore (items + outfits/bases/categories)
 //   both have data            -> mergeImport (normUrl 冪等 dedup), items only
 // Returns "off" | "error" | "empty" | "restored" | "merged".
-async function syncPullMerge({ notify = false } = {}) {
+async function syncPullMerge({ notify = false, hops = 0 } = {}) {
   if (!syncReady()) return "off";
   let parsed;
   try {
@@ -1039,6 +1045,13 @@ async function syncPullMerge({ notify = false } = {}) {
     if (!r.ok) return "error";
     parsed = await r.json();
   } catch { return "error"; }
+  // The account was re-keyed on another device（合言葉を変更）: the old key keeps a
+  // forwarding pointer (with the full data), so this device follows it by itself.
+  if (parsed && typeof parsed.movedTo === "string" && validSyncToken(parsed.movedTo) && parsed.movedTo !== syncToken && hops < 3) {
+    await setSyncToken(parsed.movedTo); syncToken = parsed.movedTo;
+    await setSyncPass(""); syncPass = ""; // the new passphrase itself is never transmitted
+    return syncPullMerge({ notify, hops: hops + 1 });
+  }
   let incoming;
   try { incoming = itemsFromParsed(parsed); } catch { return "error"; }
 
@@ -1085,7 +1098,7 @@ async function syncAutoRecover() {
     await setSyncToken(d.token); syncToken = d.token;
     await setSyncEnabled(true); syncEnabled = true;
     await setWorker(workerUrl);
-    toast("クラウド同期を自動復旧しました");
+    toast("自動でログインしました（クラウドからデータを復元します）");
     return true;
   } catch { return false; }
 }
@@ -1364,10 +1377,12 @@ function openDangerZone() {
     if (confirmInput.value.trim() !== "削除") return;
     if (!confirm(`本当に ${n} 件すべて（お気に入り・コーデ・サイズ基準）を削除しますか？\nこの操作は元に戻せません。`)) return;
     if (!confirm("最終確認：完全に消去します。よろしいですか？")) return;
-    const wipeCloud = syncEnabled && wipeCloudCb.checked;
-    if (syncEnabled && !wipeCloud) {
-      // keep the cloud backup: stop sync BEFORE wiping so nothing propagates
-      syncEnabled = false; await setSyncEnabled(false);
+    const hadAccount = loggedIn();
+    const wipeCloud = hadAccount && wipeCloudCb.checked;
+    if (hadAccount && !wipeCloud) {
+      // keep the cloud copy: sign out BEFORE wiping so nothing propagates;
+      // logging in again with the same 合言葉 brings everything back
+      await signOut();
     }
     await setOutfits([]); await setBases({}); await setItems([]); // items last -> triggers reload
     if (wipeCloud) {
@@ -1381,8 +1396,8 @@ function openDangerZone() {
       } catch { /* cloud wipe is best-effort; guard would reject later empty pushes anyway */ }
     }
     overlay.remove();
-    toast(wipeCloud ? "端末とクラウドの両方を削除しました" : (syncToken ? "削除しました（クラウドのバックアップは残っています）" : "すべて削除しました"));
-    if (syncToken && !wipeCloud) setTimeout(() => alert("クラウドのバックアップは残してあります。\n復元するには ⋯→「クラウド同期」を再度ONにしてください（同じトークンのまま）。"), 400);
+    toast(wipeCloud ? "端末とクラウドの両方を削除しました" : (hadAccount ? "この端末のデータを削除しました（クラウドには残っています）" : "すべて削除しました"));
+    if (hadAccount && !wipeCloud) setTimeout(() => alert("クラウドのデータは残してあります。\n同じ合言葉でログインすれば、いつでも全部戻ります。"), 400);
   });
   const modal = el("div", { class: "modal sm", onclick: (e) => e.stopPropagation() }, [
     el("button", { class: "x", text: "×", onclick: () => overlay.remove() }),
@@ -1392,9 +1407,9 @@ function openDangerZone() {
       el("br"), el("b", { style: "color:var(--accent);", text: "元に戻せません。" }), " 先にバックアップの保存をおすすめします。",
     ]),
     el("button", { class: "btn btn-ghost", style: "width:100%;margin-bottom:14px;", text: "⬇ バックアップを保存（JSON）", onclick: async () => { await exportJson(); } }),
-    syncEnabled ? el("label", { style: "display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.6;margin-bottom:12px;cursor:pointer;" }, [
+    loggedIn() ? el("label", { style: "display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.6;margin-bottom:12px;cursor:pointer;" }, [
       wipeCloudCb,
-      el("span", {}, ["クラウドのバックアップも消去する", el("br"), el("span", { style: "color:var(--stone);font-size:11.5px;", text: "オフのまま消すと、クラウド側は残り「同期を再度ON」でいつでも復元できます（推奨）。" })]),
+      el("span", {}, ["クラウドのデータも消去する", el("br"), el("span", { style: "color:var(--stone);font-size:11.5px;", text: "オフのまま消すと、この端末からログアウトするだけでクラウド側は残ります（同じ合言葉で再ログインすれば全部戻ります・推奨）。" })]),
     ]) : null,
     el("div", { class: "fld" }, [el("label", { text: "確認のため「削除」と入力", style: "color:var(--accent);" }), confirmInput]),
     el("div", { class: "modal-foot" }, [
@@ -1420,26 +1435,6 @@ async function handleHashAdd() {
   } catch { /* ignore malformed */ }
   history.replaceState(null, "", location.pathname + location.search);
   return false;
-}
-
-// 復元リンク: ?sync=<token>[&worker=<url>] — self-healing entry point. Opening it
-// on a wiped device re-provisions the sync config and the boot pull then restores
-// everything from the cloud. The credentials are stripped from the URL/history
-// immediately after being saved. (The link is produced by the sync settings modal;
-// the user keeps it in their notes — one tap undoes any browser storage wipe.)
-async function handleSyncRestoreParam() {
-  if (!window.__EDIT_WEB__) return false;
-  const p = new URLSearchParams(location.search);
-  const t = (p.get("sync") || "").trim();
-  if (!t || !validSyncToken(t)) return false;
-  const w = (p.get("worker") || "").trim();
-  await setSyncToken(t); syncToken = t;
-  if (/^https:\/\/\S+$/.test(w)) { await setWorker(w); workerUrl = w; }
-  await setSyncEnabled(true); syncEnabled = true;
-  p.delete("sync"); p.delete("worker");
-  history.replaceState(null, "", location.pathname + (p.toString() ? "?" + p.toString() : "") + location.hash);
-  toast("復元リンクを読み込みました。クラウドと同期します…");
-  return true;
 }
 
 // Web Share Target: the browser's "Share → EDIT" opens the app with the shared
@@ -1742,45 +1737,154 @@ function openFxSettings() {
 }
 
 /* ---------- cloud sync settings modal ---------- */
+/* ---------- account（合言葉ログイン） ----------
+   Like any normal app: you log in ONCE with a passphrase you choose; your data
+   lives in the cloud under a key derived from it. If the phone's browser storage
+   is ever wiped, boot auto-recovers via the worker cookie; if that is gone too,
+   the app just shows the login screen again. Nothing to copy, no restore links,
+   no second icon. */
+function loggedIn() { return syncEnabled && validSyncToken(syncToken); }
+function passHint() { return `合言葉は${PASSPHRASE_MIN}文字以上にしてください（忘れない言葉を3〜4語。例：青い 傘 と 猫）。`; }
+
+// Sign in with a passphrase (or a pre-1.2 token). Pull first: a known account
+// restores; an unknown key on a bare device asks before creating a new account,
+// so a typo can't silently turn into a fresh empty account.
+async function signIn(secret, { legacy = false } = {}) {
+  let key;
+  try { key = legacy ? String(secret || "").trim() : await deriveSyncKey(secret); }
+  catch { alert(passHint()); return false; }
+  if (!validSyncToken(key)) { alert(legacy ? "トークンの形式が正しくありません。" : passHint()); return false; }
+  const prev = { token: syncToken, enabled: syncEnabled, pass: syncPass };
+  if (!workerUrl) workerUrl = DEFAULT_WORKER;
+  await setWorker(workerUrl);
+  const pass = legacy ? "" : normalizePassphrase(secret);
+  await setSyncToken(key); syncToken = key;
+  await setSyncEnabled(true); syncEnabled = true;
+  await setSyncPass(pass); syncPass = pass;
+  const res = await syncPullMerge({ notify: true });
+  if (res === "error" || res === "off") {
+    alert("クラウドに接続できませんでした。電波の状態を確認して、もう一度お試しください。\n（この端末のデータはそのまま使えます。次回起動時に自動で再接続します）");
+    await setLoginSkip(false); loginSkip = false;
+    await renderBackupNotice();
+    return true; // stay signed in; boot / the next change retries
+  }
+  if (res === "empty") {
+    const bare = (await getItems()).every((i) => normUrl(i.url) === normUrl(SEED_BASE.url));
+    if (bare && !confirm("この合言葉のデータは、まだクラウドにありません。\n\n・初めて使う合言葉 → OK（新しく始めます）\n・以前使った合言葉のはず → キャンセル（入力を確認してください）")) {
+      await setSyncToken(prev.token); syncToken = prev.token;
+      await setSyncEnabled(prev.enabled); syncEnabled = prev.enabled;
+      await setSyncPass(prev.pass); syncPass = prev.pass;
+      return false;
+    }
+    await syncPushNow({ interactive: true });
+    toast("ログインしました（新しく始めました）");
+  } else {
+    toast(res === "restored" ? "ログインしました（クラウドから復元）" : "ログインしました");
+    syncPushNow(); // converge the merged state
+  }
+  await setLoginSkip(false); loginSkip = false;
+  await renderBackupNotice();
+  return true;
+}
+async function signOut() {
+  syncDirty = false; if (syncPushTimer) { clearTimeout(syncPushTimer); syncPushTimer = null; }
+  await setSyncEnabled(false); syncEnabled = false;
+  await setSyncToken(""); syncToken = "";
+  await setSyncPass(""); syncPass = "";
+  await setSyncLastPush(0); syncLastPush = 0;
+  await setSyncLastPull(0); syncLastPull = 0;
+  await renderBackupNotice();
+}
+// Re-key the account: pull everything under the current key, push it under the
+// new key, then leave a forwarding pointer (movedTo, with the full data) under
+// the old key so every other device switches on its next boot — no re-login.
+async function changePassphrase(newPass) {
+  let key;
+  try { key = await deriveSyncKey(newPass); } catch { alert(passHint()); return false; }
+  const res = await syncPullMerge({});
+  if (res === "error" || res === "off") { alert("クラウドに接続できないため、今は変更できません。電波の状態を確認してください。"); return false; }
+  const oldKey = syncToken, oldPass = syncPass;
+  if (key === oldKey) { toast("今と同じ合言葉です"); return true; }
+  await setSyncToken(key); syncToken = key;
+  await setSyncPass(normalizePassphrase(newPass)); syncPass = normalizePassphrase(newPass);
+  const ok = await syncPushNow({ interactive: true });
+  if (!ok) { // never leave this device pointing at a key the cloud doesn't hold
+    await setSyncToken(oldKey); syncToken = oldKey;
+    await setSyncPass(oldPass); syncPass = oldPass;
+    return false;
+  }
+  try {
+    const fwd = { ...(await fullExportEnvelope()), movedTo: key };
+    await syncFetch(syncEndpoint(workerUrl, oldKey), { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(fwd), signal: AbortSignal.timeout(15000) });
+    syncPushNow(); // last /sync call wins the worker's recovery cookie -> point it at the new key
+  } catch { /* best-effort: other devices can still log in with the new 合言葉 */ }
+  toast("合言葉を変更しました（他の端末は次回起動時に自動で切り替わります）");
+  return true;
+}
+
+// The login form (shared by the boot gate and the account modal).
+function loginForm(onDone) {
+  const passI = el("input", { placeholder: "例）青い 傘 と 猫", autocapitalize: "off", autocorrect: "off", spellcheck: "false", style: "font-size:15px;" });
+  let legacy = false;
+  const legacyLink = el("a", { href: "#", style: "font-size:12px;color:var(--stone);", text: "以前のトークンをお持ちの方はこちら", onclick: (e) => {
+    e.preventDefault(); legacy = !legacy;
+    passI.placeholder = legacy ? "トークンを貼り付け" : "例）青い 傘 と 猫";
+    legacyLink.textContent = legacy ? "合言葉でのログインに戻す" : "以前のトークンをお持ちの方はこちら";
+  } });
+  const btn = el("button", { class: "btn btn-ink", text: "ログイン", style: "width:100%;margin-top:4px;", onclick: async () => {
+    btn.disabled = true; btn.textContent = "確認中…";
+    let ok = false;
+    try { ok = await signIn(passI.value, { legacy }); }
+    finally { btn.disabled = false; btn.textContent = "ログイン"; }
+    if (ok) onDone();
+  } });
+  passI.addEventListener("keydown", (e) => { if (e.key === "Enter") btn.click(); });
+  const wrap = el("div", {}, [
+    el("div", { class: "fld" }, [el("label", { text: "合言葉" }), passI]),
+    btn,
+    el("div", { style: "margin-top:8px;" }, [legacyLink]),
+  ]);
+  wrap._focus = () => passI.focus();
+  return wrap;
+}
+
+// Web/PWA boot gate: shown when not logged in (unless the user chose「あとで」).
+function showLoginGate() {
+  if (document.getElementById("edit-login")) return;
+  const overlay = el("div", { class: "overlay", id: "edit-login" });
+  const form = loginForm(() => overlay.remove());
+  const modal = el("div", { class: "modal sm", onclick: (e) => e.stopPropagation() }, [
+    el("h2", { class: "serif", text: "ログイン" }),
+    el("div", { style: "font-size:13px;color:var(--stone);line-height:1.8;margin-bottom:12px;" }, [
+      "お気に入りはクラウドに保存され、", el("b", { text: "合言葉" }), "で紐づきます。",
+      el("br"), "初めての方：ここで決めた合言葉が、そのままあなたのアカウントになります。",
+      el("br"), "PCとスマホで同じ合言葉を入れると、同じデータになります。",
+    ]),
+    form,
+    el("div", { style: "text-align:right;margin-top:10px;" }, [
+      el("a", { href: "#", style: "font-size:12px;color:var(--stone);", text: "あとで（この端末だけで使う）", onclick: async (e) => { e.preventDefault(); await setLoginSkip(true); loginSkip = true; overlay.remove(); } }),
+    ]),
+  ]);
+  overlay.append(modal); document.body.append(overlay);
+  setTimeout(() => form._focus && form._focus(), 50);
+}
+
 function openSyncSettings() {
   const overlay = el("div", { class: "overlay", onclick: (e) => { if (e.target === overlay) overlay.remove(); } });
   const fmtTs = (ts) => (ts ? new Date(ts).toLocaleString("ja-JP") : "まだありません");
-  let draftToken = syncToken || genSyncToken(); // first open: generate & show immediately
-
-  const enabledCb = el("input", { type: "checkbox", style: "width:16px;height:16px;accent-color:var(--ink);flex:0 0 auto;cursor:pointer;" });
-  enabledCb.checked = syncEnabled;
-  const tokenI = el("input", { spellcheck: "false", autocapitalize: "off", autocorrect: "off", style: "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;" });
-  tokenI.value = draftToken;
-  tokenI.addEventListener("input", () => { draftToken = tokenI.value.trim(); });
-  const workerI = el("input", { placeholder: "https://xxxx.workers.dev", inputmode: "url" });
-  workerI.value = workerUrl || "";
 
   const status = el("div", { style: "font-size:12px;color:var(--stone);line-height:1.8;border-top:1px dashed var(--line);padding-top:8px;margin-top:2px;" });
   const renderStatus = () => {
     status.innerHTML = "";
+    if (!loggedIn()) return;
     status.append(
-      el("div", { text: `最終プッシュ（この端末 → クラウド）: ${fmtTs(syncLastPush)}` }),
-      el("div", { text: `最終プル（クラウド → この端末）: ${fmtTs(syncLastPull)}` }),
+      el("div", { text: `最終保存（この端末 → クラウド）: ${fmtTs(syncLastPush)}` }),
+      el("div", { text: `最終取得（クラウド → この端末）: ${fmtTs(syncLastPull)}` }),
     );
-  };
-  renderStatus();
-
-  // persist the draft (token/URL/toggle); returns false when invalid
-  const save = async () => {
-    const wu = (workerI.value || "").trim();
-    if (enabledCb.checked) {
-      if (!validSyncToken(draftToken)) { alert("トークンは16文字以上の英数字・-・_ にしてください（「再生成」で作れます）。"); return false; }
-      if (!wu) { alert("Worker URL を入力してください。\n未作成なら worker/README.md（デプロイ約5分・無料）を参照。取得代行URLと同じもので構いません。"); return false; }
-    }
-    await setWorker(wu); workerUrl = wu;
-    await setSyncToken(draftToken); syncToken = draftToken;
-    await setSyncEnabled(enabledCb.checked); syncEnabled = enabledCb.checked;
-    return true;
   };
 
   const syncNowBtn = el("button", { class: "btn btn-ghost", text: "今すぐ同期", onclick: async () => {
-    if (!(await save())) return;
-    if (!syncEnabled) { alert("「クラウド同期を有効にする」を ON にしてから実行してください。"); return; }
+    if (!loggedIn()) { alert("先にログインしてください。"); return; }
     syncNowBtn.disabled = true; syncNowBtn.textContent = "同期中…";
     await syncNow();
     syncLastPush = await getSyncLastPush(); syncLastPull = await getSyncLastPull();
@@ -1788,15 +1892,13 @@ function openSyncSettings() {
     syncNowBtn.disabled = false; syncNowBtn.textContent = "今すぐ同期";
   } });
 
-  // Disaster recovery: the worker keeps ONE previous snapshot (sync:<token>:prev,
-  // written before every overwrite). If the current cloud copy was ever buried by
-  // a bad push, this pulls the one-generation-back copy and merges it in.
+  // Disaster recovery: the worker keeps ONE previous snapshot (written before
+  // every overwrite). Pull the one-generation-back copy and merge it in.
   const prevBtn = el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "1つ前のバックアップから復元", onclick: async () => {
-    if (!(await save())) return;
-    if (!validSyncToken(draftToken) || !workerUrl) { alert("トークンと Worker URL を設定してください。"); return; }
+    if (!loggedIn()) { alert("先にログインしてください。"); return; }
     prevBtn.disabled = true; prevBtn.textContent = "取得中…";
     try {
-      const r = await syncFetch(syncEndpoint(workerUrl, draftToken) + "&prev=1", { signal: AbortSignal.timeout(15000) });
+      const r = await syncFetch(syncEndpoint(workerUrl, syncToken) + "&prev=1", { signal: AbortSignal.timeout(15000) });
       if (r.status === 404) { alert("1つ前のバックアップはまだありません（上書きが1回も起きていません）。"); return; }
       if (!r.ok) { alert("取得に失敗しました（HTTP " + r.status + "）。"); return; }
       const parsed = await r.json();
@@ -1817,103 +1919,92 @@ function openSyncSettings() {
     }
   } });
 
+  // 詳細設定: the worker URL (取得代行 + 同期). The web build has a baked-in default.
+  const workerI = el("input", { placeholder: "https://xxxx.workers.dev", inputmode: "url" });
+  workerI.value = workerUrl || "";
+  workerI.addEventListener("change", async () => { const wu = (workerI.value || "").trim(); await setWorker(wu); workerUrl = wu; });
+
+  const body = el("div");
+  const render = () => {
+    body.innerHTML = "";
+    if (loggedIn()) {
+      let shown = false;
+      const passVal = el("span", { style: "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;", text: syncPass ? "●●●●●●" : "（この端末には控えがありません）" });
+      const showBtn = syncPass ? el("button", { class: "btn btn-ghost", style: "font-size:12px;margin-left:8px;", text: "表示", onclick: () => { shown = !shown; passVal.textContent = shown ? syncPass : "●●●●●●"; showBtn.textContent = shown ? "隠す" : "表示"; } }) : null;
+      body.append(
+        el("div", { style: "font-size:13px;line-height:1.9;margin-bottom:6px;" }, [
+          el("b", { text: "ログイン中" }), el("br"),
+          "合言葉: ", passVal, showBtn,
+          syncPass ? null : el("div", { style: "font-size:11.5px;color:var(--stone);", text: "以前のトークン、または自動復旧でログインしています。「合言葉を変更」で覚えやすい合言葉にできます。" }),
+        ]),
+        el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 4px;" }, [
+          el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "合言葉を変更", onclick: async () => {
+            const np = prompt("新しい合言葉（" + PASSPHRASE_MIN + "文字以上・忘れない言葉を3〜4語）");
+            if (np == null) return;
+            if (await changePassphrase(np)) render();
+          } }),
+          el("button", { class: "btn btn-ghost", style: "font-size:12px;color:var(--accent);", text: "ログアウト", onclick: async () => {
+            if (!confirm("ログアウトしますか？\nこの端末のデータはそのまま残り、クラウドのデータも残ります。同じ合言葉で再ログインすれば戻ります。")) return;
+            await signOut(); render(); renderStatus();
+          } }),
+        ]),
+      );
+    } else {
+      body.append(
+        el("div", { style: "font-size:13px;color:var(--stone);line-height:1.8;margin-bottom:8px;", text: "ログインしていません。合言葉でログインすると、お気に入りがクラウドに保存され、端末のデータが消えても戻ります。" }),
+        loginForm(() => { render(); renderStatus(); }),
+      );
+    }
+  };
+  render(); renderStatus();
+
+  // 環境診断: なぜ消えるのかを1画面で特定するための情報（Web/PWAのみ）
+  const diag = window.__EDIT_WEB__ ? (() => {
+    const d = el("div", { style: "font-size:11px;color:var(--stone);line-height:1.8;background:var(--paper);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:4px 0 8px;white-space:pre-wrap;", text: "環境情報を取得中…" });
+    (async () => {
+      try {
+        const ua = navigator.userAgent || "";
+        const env = /; wv\)/.test(ua) ? "アプリ内ブラウザ(WebView)⚠️" :
+          /SamsungBrowser/i.test(ua) ? "Samsung Internet" :
+          /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" :
+          /Safari\//.test(ua) ? "Safari" : "不明";
+        const standalone = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
+        let persisted = null, usage = null, quota = null;
+        if (navigator.storage) {
+          if (navigator.storage.persist) { try { persisted = (await navigator.storage.persisted()) || (await navigator.storage.persist()); } catch { /* ignore */ } }
+          if (navigator.storage.estimate) { try { const e = await navigator.storage.estimate(); usage = e.usage; quota = e.quota; } catch { /* ignore */ } }
+        }
+        const mb = (n) => n == null ? "?" : (n < 1048576 ? Math.round(n / 1024) + "KB" : Math.round(n / 1048576) + "MB");
+        let t = `実行環境: ${env}${standalone ? "（ホーム画面アプリ✓）" : "（ブラウザタブ）"}\n` +
+          `保存の保護: ${persisted === true ? "許可✓" : persisted === false ? "未許可⚠️（ブラウザの自動整理で消される可能性）" : "確認不可"}\n` +
+          `使用容量: ${mb(usage)} / 空き上限 ${mb(quota)}`;
+        if (persisted === false || !standalone) t += `\n→ 対策: Chromeメニュー⋮→「ホーム画面に追加/アプリをインストール」をして、そのアイコンから起動すると保護されやすくなります。`;
+        const flog = forensicsLog();
+        if (flog.length) t += "\n\n直近のリセット検知:\n" + flog.slice(-3).map((e) => `${String(e.at || "").slice(0, 16).replace("T", " ")} [${e.kind}] ${e.hint}${e.survived && e.survived.length ? "（残存: " + e.survived.join(",") + "）" : ""}`).join("\n");
+        d.textContent = t;
+      } catch (e) { d.textContent = "環境情報の取得に失敗: " + (e && e.message ? e.message : e); }
+    })();
+    return d;
+  })() : null;
+
   const modal = el("div", { class: "modal sm", onclick: (e) => e.stopPropagation() }, [
     el("button", { class: "x", text: "×", onclick: () => overlay.remove() }),
-    el("h2", { class: "serif", text: "クラウド同期（自動バックアップ）" }),
+    el("h2", { class: "serif", text: "アカウント（クラウド同期）" }),
     el("div", { style: "font-size:12.5px;color:var(--stone);line-height:1.7;margin-bottom:12px;" }, [
-      "変更のたびに、あなた専用の Cloudflare Worker（無料枠）へ自動バックアップします。データが消えても次回起動時にクラウドから自動復元。",
-      el("br"),
-      el("b", { text: "PCとスマホで同じトークンを設定すると、同じデータに同期されます。" }),
-      el("br"),
-      "トークンは合言葉です。メモ帳などに控えておくと、端末を替えても復元できます。",
-      window.__EDIT_WEB__ ? el("span", {}, [el("br"), el("b", { text: "おすすめ：下の「📱 ホーム画面に復元アイコン」を1回だけ設定" }), " — ブラウザのデータが全部消えても、そのアイコンを1タップすれば設定ごと元に戻ります。"]) : null,
+      "変更のたびに自動でクラウド（あなた専用の Cloudflare Worker・無料枠）へ保存され、", el("b", { text: "PCとスマホで同じ合言葉を入れると同じデータ" }), "になります。",
     ]),
-    el("div", { class: "fld" }, [
-      el("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--ink);" }, [
-        enabledCb, el("b", { text: "クラウド同期を有効にする" }),
-      ]),
-    ]),
-    el("div", { class: "fld" }, [
-      el("label", { text: "同期トークン（別端末に貼り付けると同じデータに接続）" }),
-      tokenI,
-      el("div", { style: "display:flex;gap:6px;margin-top:6px;" }, [
-        el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "コピー", onclick: async () => {
-          try { await navigator.clipboard.writeText(draftToken); toast("トークンをコピーしました"); }
-          catch { tokenI.select(); document.execCommand && document.execCommand("copy"); toast("トークンをコピーしました"); }
-        } }),
-        el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "再生成", onclick: () => {
-          if (!confirm("トークンを作り直しますか？\n（他の端末は新しいトークンを設定し直すまで接続できなくなります）")) return;
-          draftToken = genSyncToken(); tokenI.value = draftToken;
-        } }),
-        window.__EDIT_WEB__ ? el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "📱 ホーム画面に復元アイコン", onclick: async () => {
-          draftToken = (tokenI.value || "").trim();
-          if (!validSyncToken(draftToken)) { alert("先にトークンを設定してください。"); return; }
-          const w = (workerI.value || "").trim();
-          if (!w) { alert("先に Worker URL を設定してください。"); return; }
-          // A manifest-free page: Chrome's「ホーム画面に追加」turns it into a plain shortcut
-          // that keeps the URL (and so the restore key) on the launcher — outside the browser.
-          const base = location.origin + location.pathname.replace(/[^/]*$/, "");
-          const url = base + "restore.html?sync=" + encodeURIComponent(draftToken) + "&worker=" + encodeURIComponent(w);
-          const win = window.open(url, "_blank");
-          if (!win) { try { await navigator.clipboard.writeText(url); } catch { /* ignore */ } alert("復元ページのURLをコピーしました。Chromeで開き、メニュー⋮→「ホーム画面に追加」してください。"); }
-        } }) : null,
-        window.__EDIT_WEB__ ? el("button", { class: "btn btn-ghost", style: "font-size:12px;", text: "🔗 復元リンク", onclick: async () => {
-          draftToken = (tokenI.value || "").trim();
-          if (!validSyncToken(draftToken)) { alert("先にトークンを設定してください。"); return; }
-          const w = (workerI.value || "").trim();
-          if (!w) { alert("先に Worker URL を設定してください。"); return; }
-          const link = location.origin + location.pathname + "?sync=" + encodeURIComponent(draftToken) + "&worker=" + encodeURIComponent(w);
-          try { await navigator.clipboard.writeText(link); } catch { prompt("このリンクをコピーしてください：", link); }
-          alert("復元リンクをコピーしました。Obsidianやメモ帳に貼って保存してください。\n\nもしまたデータが消えても、このリンクを開くだけで設定もデータも全部戻ります。");
-        } }) : null,
-      ]),
-    ]),
-    el("div", { class: "fld" }, [
-      el("label", { text: "Worker URL（取得代行URLと共通）" }),
-      workerI,
-      el("div", { style: "font-size:11px;color:var(--stone);margin-top:4px;line-height:1.6;", text: "※ 同期には Worker 側で KV（EDIT_KV）の設定が必要です（worker/README.md 参照・無料）。" }),
-    ]),
+    body,
     status,
-    el("div", { style: "margin:2px 0 6px;" }, [prevBtn]),
-    // 環境診断: なぜ消えるのかを1画面で特定するための情報（Web/PWAのみ）
-    window.__EDIT_WEB__ ? (() => {
-      const diag = el("div", { style: "font-size:11px;color:var(--stone);line-height:1.8;background:var(--paper);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:4px 0 8px;white-space:pre-wrap;", text: "環境情報を取得中…" });
-      (async () => {
-        try {
-          const ua = navigator.userAgent || "";
-          const env = /; wv\)/.test(ua) ? "アプリ内ブラウザ(WebView)⚠️" :
-            /SamsungBrowser/i.test(ua) ? "Samsung Internet" :
-            /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" :
-            /Safari\//.test(ua) ? "Safari" : "不明";
-          const standalone = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
-          let persisted = null, usage = null, quota = null;
-          if (navigator.storage) {
-            if (navigator.storage.persist) { try { persisted = (await navigator.storage.persisted()) || (await navigator.storage.persist()); } catch { /* ignore */ } }
-            if (navigator.storage.estimate) { try { const e = await navigator.storage.estimate(); usage = e.usage; quota = e.quota; } catch { /* ignore */ } }
-          }
-          const mb = (n) => n == null ? "?" : (n < 1048576 ? Math.round(n / 1024) + "KB" : Math.round(n / 1048576) + "MB");
-          let t = `実行環境: ${env}${standalone ? "（ホーム画面アプリ✓）" : "（ブラウザタブ）"}\n` +
-            `保存の保護: ${persisted === true ? "許可✓" : persisted === false ? "未許可⚠️（ブラウザの自動整理で消される可能性）" : "確認不可"}\n` +
-            `使用容量: ${mb(usage)} / 空き上限 ${mb(quota)}`;
-          if (persisted === false || !standalone) t += `\n→ 対策: Chromeメニュー⋮→「ホーム画面に追加/アプリをインストール」をして、そのアイコンから起動すると保護されやすくなります。`;
-          const flog = forensicsLog();
-          if (flog.length) t += "\n\n直近のリセット検知:\n" + flog.slice(-3).map((e) => `${String(e.at || "").slice(0, 16).replace("T", " ")} [${e.kind}] ${e.hint}${e.survived && e.survived.length ? "（残存: " + e.survived.join(",") + "）" : ""}`).join("\n");
-          diag.textContent = t;
-        } catch (e) { diag.textContent = "環境情報の取得に失敗: " + (e && e.message ? e.message : e); }
-      })();
-      return diag;
-    })() : null,
+    el("div", { style: "margin:6px 0;" }, [prevBtn]),
+    el("details", { style: "font-size:12px;color:var(--stone);margin:6px 0 8px;" }, [
+      el("summary", { style: "cursor:pointer;", text: "詳細設定（Worker URL）" }),
+      el("div", { class: "fld", style: "margin-top:6px;" }, [el("label", { text: "Worker URL（取得代行・同期で共通）" }), workerI]),
+    ]),
+    diag,
     el("div", { class: "modal-foot" }, [
       syncNowBtn,
       el("span", { style: "flex:1;" }),
-      el("button", { class: "btn btn-ghost", text: "キャンセル", onclick: () => overlay.remove() }),
-      el("button", { class: "btn btn-ink", text: "保存", onclick: async () => {
-        const wasOn = syncEnabled;
-        if (!(await save())) return;
-        overlay.remove();
-        await renderBackupNotice(); // ON なら手動バックアップのリマインドを畳む
-        if (syncEnabled && !wasOn) { toast("クラウド同期を開始します…"); syncBoot(); } // first ON: pull(復元)→push
-      } }),
+      el("button", { class: "btn btn-ink", text: "閉じる", onclick: () => overlay.remove() }),
     ]),
   ]);
   overlay.append(modal); document.body.append(overlay);
@@ -1931,8 +2022,10 @@ buildShell();
 // Exposed so tests (and debugging) can await the full boot chain.
 window.__EDIT_BOOT__ = reload().then(async () => {
   const scan = await forensicsScan();
-  await handleSyncRestoreParam();
   const recovered = await syncAutoRecover();
   forensicsRecord(scan, recovered || !!syncToken);
   await handleHashAdd(); handleShareParam(); syncBoot();
+  // Web: not logged in (fresh install or a wiped device whose cookie is gone too)
+  // -> plain login screen, unless the user chose「あとで」.
+  if (window.__EDIT_WEB__ && !loggedIn() && !loginSkip) showLoginGate();
 });
