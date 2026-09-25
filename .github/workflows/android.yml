@@ -131,8 +131,7 @@ jobs:
             adb install -r apk-debug/EDIT-android-debug.apk
             adb shell am start -n io.github.nomataiga.edit/.MainActivity
             sleep 30
-            PID=$(adb shell pidof io.github.nomataiga.edit | tr -d "
- ")
+            PID=$(adb shell pidof io.github.nomataiga.edit | tr -cd "0-9")
             echo "pid=$PID"
             adb forward tcp:9222 "localabstract:webview_devtools_remote_$PID"
             PAGES=$(curl -s http://localhost:9222/json || true)
