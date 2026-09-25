@@ -53,12 +53,14 @@ jobs:
         run: |
           cd android && chmod +x gradlew
           if [ -n "$EDIT_KEYSTORE_PATH" ]; then
-            ./gradlew assembleRelease --no-daemon -q
+            ./gradlew assembleRelease assembleDebug --no-daemon -q
             cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/EDIT-android.apk"
           else
             ./gradlew assembleDebug --no-daemon -q
             cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/EDIT-android.apk"
           fi
+          # debug variant = same code with WebView DevTools enabled; used only by the smoke job
+          cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/EDIT-android-debug.apk"
       - name: APK facts
         id: meta
         run: |
@@ -72,6 +74,10 @@ jobs:
         with:
           name: EDIT-android.apk
           path: ${{ runner.temp }}/EDIT-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EDIT-android-debug.apk
+          path: ${{ runner.temp }}/EDIT-android-debug.apk
       - name: Attach to Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,6 +95,10 @@ jobs:
         with:
           name: EDIT-android.apk
           path: apk
+      - uses: actions/download-artifact@v4
+        with:
+          name: EDIT-android-debug.apk
+          path: apk-debug
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -109,14 +119,22 @@ jobs:
             sleep 30
             adb shell am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "https://example.com/products/test-jacket" -n io.github.nomataiga.edit/.MainActivity
             sleep 12
-            adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 || true
-            echo "--- visible texts in the WebView (proves the live app rendered) ---"
-            adb shell cat /sdcard/ui.xml 2>/dev/null | grep -o "text=\"[^\"]{1,60}\"" | sort -u | head -20 || true
             adb logcat -d > logcat.txt
             echo "--- EDIT / Capacitor lines ---"
             grep -E " EDIT |Capacitor" logcat.txt | head -40 || true
-            echo "--- resumed activity ---"
-            adb shell dumpsys activity activities | grep -E "ResumedActivity" | head -2 || true
             if grep -q "FATAL EXCEPTION" logcat.txt; then echo "CRASH"; grep -A 25 "FATAL EXCEPTION" logcat.txt | head -60; exit 1; fi
             grep -q "share -> https://nomataiga-del.github.io/edit-app/?text=" logcat.txt && echo "SHARE OK" || { echo "share log missing"; exit 1; }
             adb shell dumpsys activity activities | grep -q "io.github.nomataiga.edit/.MainActivity" && echo "ACTIVITY OK" || { echo "activity not running"; exit 1; }
+            # Rendering proof: the debug variant (same code) exposes its WebView to DevTools;
+            # the page list must show the live app URL and title.
+            adb uninstall io.github.nomataiga.edit >/dev/null
+            adb install -r apk-debug/EDIT-android-debug.apk
+            adb shell am start -n io.github.nomataiga.edit/.MainActivity
+            sleep 30
+            PID=$(adb shell pidof io.github.nomataiga.edit | tr -d "
+ ")
+            echo "pid=$PID"
+            adb forward tcp:9222 "localabstract:webview_devtools_remote_$PID"
+            PAGES=$(curl -s http://localhost:9222/json || true)
+            echo "$PAGES" | grep -E "\"(url|title)\"" | head -6
+            echo "$PAGES" | grep -q "nomataiga-del.github.io/edit-app" && echo "$PAGES" | grep -q "EDIT" && echo "RENDER OK" || { echo "live app not rendered in WebView"; exit 1; }
