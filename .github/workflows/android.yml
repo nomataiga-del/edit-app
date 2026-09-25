@@ -109,6 +109,9 @@ jobs:
             sleep 30
             adb shell am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "https://example.com/products/test-jacket" -n io.github.nomataiga.edit/.MainActivity
             sleep 12
+            adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 || true
+            echo "--- visible texts in the WebView (proves the live app rendered) ---"
+            adb shell cat /sdcard/ui.xml 2>/dev/null | grep -o "text=\"[^\"]{1,60}\"" | sort -u | head -20 || true
             adb logcat -d > logcat.txt
             echo "--- EDIT / Capacitor lines ---"
             grep -E " EDIT |Capacitor" logcat.txt | head -40 || true
