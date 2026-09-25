@@ -91,6 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: EDIT-android.apk
@@ -112,28 +113,4 @@ jobs:
           target: google_apis
           profile: pixel_6
           disable-animations: true
-          script: |
-            adb install -r apk/EDIT-android.apk
-            adb logcat -c
-            adb shell am start -n io.github.nomataiga.edit/.MainActivity
-            sleep 30
-            adb shell am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "https://example.com/products/test-jacket" -n io.github.nomataiga.edit/.MainActivity
-            sleep 12
-            adb logcat -d > logcat.txt
-            echo "--- EDIT / Capacitor lines ---"
-            grep -E " EDIT |Capacitor" logcat.txt | head -40 || true
-            if grep -q "FATAL EXCEPTION" logcat.txt; then echo "CRASH"; grep -A 25 "FATAL EXCEPTION" logcat.txt | head -60; exit 1; fi
-            grep -q "share -> https://nomataiga-del.github.io/edit-app/?text=" logcat.txt && echo "SHARE OK" || { echo "share log missing"; exit 1; }
-            adb shell dumpsys activity activities | grep -q "io.github.nomataiga.edit/.MainActivity" && echo "ACTIVITY OK" || { echo "activity not running"; exit 1; }
-            # Rendering proof: the debug variant (same code) exposes its WebView to DevTools;
-            # the page list must show the live app URL and title.
-            adb uninstall io.github.nomataiga.edit >/dev/null
-            adb install -r apk-debug/EDIT-android-debug.apk
-            adb shell am start -n io.github.nomataiga.edit/.MainActivity
-            sleep 30
-            PID=$(adb shell pidof io.github.nomataiga.edit | tr -cd "0-9")
-            echo "pid=$PID"
-            adb forward tcp:9222 "localabstract:webview_devtools_remote_$PID"
-            PAGES=$(curl -s http://localhost:9222/json || true)
-            echo "$PAGES" | grep -E "\"(url|title)\"" | head -6
-            echo "$PAGES" | grep -q "nomataiga-del.github.io/edit-app" && echo "$PAGES" | grep -q "EDIT" && echo "RENDER OK" || { echo "live app not rendered in WebView"; exit 1; }
+          script: bash android-shell/ci/smoke.sh
