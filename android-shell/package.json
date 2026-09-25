@@ -1,0 +1,20 @@
+{
+  "name": "edit-android-shell",
+  "private": true,
+  "version": "1.0.0",
+  "description": "EDIT Android shell: the live web app inside an app-private WebView, so data survives browser clears.",
+  "scripts": {
+    "sync": "cap sync android",
+    "assets": "capacitor-assets generate --android --iconBackgroundColor #EDECE8 --iconBackgroundColorDark #1B1A18"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/assets": "3.0.5",
+    "@capacitor/cli": "8.5.2",
+    "node-forge": "^1.3.1",
+    "sharp": "^0.34.0"
+  }
+}

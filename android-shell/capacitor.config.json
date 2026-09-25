@@ -1,0 +1,12 @@
+{
+  "appId": "io.github.nomataiga.edit",
+  "appName": "EDIT",
+  "webDir": "www",
+  "server": {
+    "url": "https://nomataiga-del.github.io/edit-app/",
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}
