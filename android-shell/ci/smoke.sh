@@ -22,14 +22,25 @@ adb shell dumpsys activity activities | grep -q "$PKG/.MainActivity" && echo "AC
 
 # 2) rendering proof: the debug variant (same code) exposes its WebView to DevTools;
 #    the page list must show the live app URL and title.
-adb uninstall "$PKG" >/dev/null
+adb uninstall "$PKG" >/dev/null || true
 adb install -r apk-debug/EDIT-android-debug.apk
-adb shell am start -n "$PKG/.MainActivity"
-sleep 30
-PID=$(adb shell pidof "$PKG" | tr -cd "0-9")
-echo "pid=$PID"
-[ -n "$PID" ] || { echo "debug app not running"; adb logcat -d | grep -E "FATAL|AndroidRuntime" | head -20; exit 1; }
-adb forward tcp:9222 "localabstract:webview_devtools_remote_$PID"
+adb logcat -c || true
+adb shell am start -n "$PKG/.MainActivity" || true
+SOCK=""
+for i in $(seq 1 12); do
+  sleep 5
+  SOCK=$(adb shell cat /proc/net/unix 2>/dev/null | grep -o "webview_devtools_remote_[0-9]*" | head -1 | tr -cd "a-z_0-9" || true)
+  [ -n "$SOCK" ] && break
+done
+echo "devtools socket=$SOCK"
+if [ -z "$SOCK" ]; then
+  echo "debug app did not expose a WebView DevTools socket - diagnostics:"
+  adb shell "ps -A | grep -i nomataiga" || true
+  adb shell dumpsys activity activities | grep -i "nomataiga" | head -5 || true
+  adb logcat -d | grep -aE "FATAL|AndroidRuntime|nomataiga|Capacitor|chromium" | tail -40 || true
+  exit 1
+fi
+adb forward tcp:9222 "localabstract:$SOCK"
 PAGES=$(curl -s http://localhost:9222/json || true)
 echo "$PAGES" | grep -E '"(url|title)"' | head -6 || true
 if echo "$PAGES" | grep -q "nomataiga-del.github.io/edit-app" && echo "$PAGES" | grep -q "EDIT"; then
