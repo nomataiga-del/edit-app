@@ -30,6 +30,9 @@ jobs:
           distribution: temurin
           java-version: 21
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          accept-android-sdk-licenses: true
       - run: npm ci --no-audit --no-fund
       - run: npx cap sync android
       - name: Keystore (signed release when the secret exists, debug build otherwise)
@@ -61,7 +64,7 @@ jobs:
         run: |
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
           BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
-          "$ANDROID_HOME/build-tools/$BT/aapt" dump badging "$RUNNER_TEMP/EDIT-android.apk" | grep -E "^package|launchable-activity|sdkVersion|targetSdkVersion|application-label:"
+          "$ANDROID_HOME/build-tools/$BT/aapt2" dump badging "$RUNNER_TEMP/EDIT-android.apk" | grep -E "^package|launchable-activity|sdkVersion|targetSdkVersion|application-label:"
           "$ANDROID_HOME/build-tools/$BT/apksigner" verify --print-certs "$RUNNER_TEMP/EDIT-android.apk" | grep -E "Signer|DN|SHA-256" | head -4
           ls -l "$RUNNER_TEMP/EDIT-android.apk"
           sha256sum "$RUNNER_TEMP/EDIT-android.apk"
