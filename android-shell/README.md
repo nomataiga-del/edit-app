@@ -9,10 +9,10 @@
 
 ## インストール（1 回だけ）
 
-1. スマホで https://github.com/nomataiga-del/edit-app/releases を開き、最新の `EDIT-android.apk` をダウンロード。
-2. ダウンロードしたファイルを開く → 「提供元不明のアプリ」を許可（Chrome に許可）→ インストール。
-3. EDIT を開く → ログイン画面に **PC と同じ合言葉** を入れる → 全部戻ります。
-4. 以前のホーム画面アイコン（Chrome の PWA）は削除して構いません（データはこのアプリとクラウドにあります）。
+1. スマホで前からある EDIT（Chrome の PWA）を開くと「この EDIT は使えません」と出ます。「Android 版を入れる」を押す（または https://github.com/nomataiga-del/edit-app/releases/latest/download/EDIT-android.apk を開く）。
+2. ダウンロードしたファイルを開く → 「提供元不明のアプリ」を許可（Chrome に許可）→ インストール → 「開く」。
+3. ログイン画面に **PC と同じ合言葉** を入れる → 全部戻ります。
+4. 前からある EDIT（Chrome の PWA）はホーム画面から消してください。v1.2.1 から、Android のブラウザで開く EDIT は保存に使えません（案内だけが出ます）。ホーム画面に EDIT が 2 つある間は、Chrome でない方を開きます。
 
 ## 更新について
 
