@@ -2,14 +2,16 @@
 name: android-persist
 on:
   workflow_dispatch:
+    inputs:
+      app_path:
+        description: "Path under /edit-app/ to load instead of the live app (e.g. next/) - to check a build before it goes live"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths: ["ci-persist/**", ".github/workflows/android-persist.yml"]
 permissions:
   contents: read
-concurrency:
-  group: android-persist
-  cancel-in-progress: true
 jobs:
   persist:
     runs-on: ubuntu-latest
@@ -27,6 +29,19 @@ jobs:
         with:
           packages: platform-tools
           accept-android-sdk-licenses: true
+      - name: Point the debug build at a preview path (only when app_path is given)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.app_path != '' }}
+        working-directory: android-shell
+        env:
+          APP_PATH: ${{ inputs.app_path }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const c = JSON.parse(fs.readFileSync("capacitor.config.json", "utf8"));
+            c.server.url = "https://nomataiga-del.github.io/edit-app/" + process.env.APP_PATH;
+            fs.writeFileSync("capacitor.config.json", JSON.stringify(c, null, 2));
+            console.log("server.url = " + c.server.url);
+          '
       - name: Build the debug variant (same code as the released APK)
         working-directory: android-shell
         run: |
