@@ -188,14 +188,27 @@ export async function setSyncBase(token, keys) { await chrome.storage.local.set(
 // (KV can return the pre-delete copy for a while) bringing a deletion back.
 export const KEY_SYNC_TOMB = "edit_sync_tomb_v1";
 const TOMB_KEEP_MS = 180 * 86400000;
-export async function getSyncTombs() { const r = await chrome.storage.local.get(KEY_SYNC_TOMB); return Object.keys(r[KEY_SYNC_TOMB] || {}); }
-export async function addSyncTombs(keys, now = Date.now()) {
+// Per account ({ token, t }), like the base. A key leaves the list as soon as an
+// upload that contains it succeeds (re-added on purpose), and on logout.
+async function readTombs(token) {
   const r = await chrome.storage.local.get(KEY_SYNC_TOMB);
-  const t = { ...(r[KEY_SYNC_TOMB] || {}) };
+  const v = r[KEY_SYNC_TOMB];
+  return v && v.token === token && v.t && typeof v.t === "object" ? { ...v.t } : {};
+}
+export async function getSyncTombs(token) { return Object.keys(await readTombs(token)); }
+export async function addSyncTombs(token, keys, now = Date.now()) {
+  const t = await readTombs(token);
   for (const k of keys || []) if (k) t[k] = now;
   for (const k of Object.keys(t)) if (now - t[k] > TOMB_KEEP_MS) delete t[k];
-  await chrome.storage.local.set({ [KEY_SYNC_TOMB]: t });
+  await chrome.storage.local.set({ [KEY_SYNC_TOMB]: { token, t } });
 }
+export async function dropSyncTombs(token, keys) {
+  const t = await readTombs(token);
+  let changed = false;
+  for (const k of keys || []) if (k in t) { delete t[k]; changed = true; }
+  if (changed) await chrome.storage.local.set({ [KEY_SYNC_TOMB]: { token, t } });
+}
+export async function clearSyncMemory() { await chrome.storage.local.set({ [KEY_SYNC_TOMB]: null, [KEY_SYNC_BASE]: null }); }
 export function mergePrimary(local, incoming, baseKeys, tombKeys) {
   const loc = Array.isArray(local) ? local : [];
   const base = new Set([...(baseKeys || []), ...(tombKeys || [])]); // seen before, or deleted here

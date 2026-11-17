@@ -17,7 +17,7 @@ import {
   validSyncToken, syncEndpoint, changesNeedPush, remapImportedBases,
   SYNC_PUSH_DEBOUNCE_MS,
   getSyncPass, setSyncPass, getLoginSkip, setLoginSkip, deriveSyncKey, normalizePassphrase, PASSPHRASE_MIN,
-  mergePrimary, syncKeyOf, getSyncBase, setSyncBase, getSyncTombs, addSyncTombs,
+  mergePrimary, syncKeyOf, getSyncBase, setSyncBase, getSyncTombs, addSyncTombs, dropSyncTombs, clearSyncMemory,
 } from "./store.js";
 import { extractProduct, DOMAIN_RULES, shopifyProductJsonUrl, shopifyFromJson, guessCategory } from "./extract.js";
 
@@ -53,9 +53,9 @@ const DEFAULT_WORKER = "https://fragrant-dust-0d49.noma-taiga.workers.dev";
 // UA, or the Capacitor bridge.
 const UA = (window.navigator && window.navigator.userAgent) || "";
 function inAndroidApp() {
+  // only the app's own bridge counts — an in-app browser (LINE etc.) also has "; wv)"
   const c = window.Capacitor;
-  if (c && typeof c.isNativePlatform === "function" && c.isNativePlatform()) return true;
-  return /Android/i.test(UA) && /; wv\)/.test(UA);
+  return !!(c && typeof c.isNativePlatform === "function" && c.isNativePlatform());
 }
 function inAndroidBrowser() { return !!window.__EDIT_WEB__ && /Android/i.test(UA) && !inAndroidApp(); }
 // The phone app is the source of truth (野間さん 2026-11-18「スマホを正」・PC は見ない):
@@ -823,7 +823,7 @@ async function toggleStatus(id) {
 }
 async function removeItem(id) {
   const gone = items.find((i) => i.id === id);
-  if (gone && canWriteCloud()) await addSyncTombs([syncKeyOf(gone)]); // a stale cloud copy must not revive it
+  if (gone && canWriteCloud() && syncToken) await addSyncTombs(syncToken, [syncKeyOf(gone)]); // a stale cloud copy must not revive it
   items = items.filter((i) => i.id !== id);
   compareIds = compareIds.filter((x) => x !== id);
   const pruned = pruneItemFromOutfits(outfits, id);
@@ -1040,7 +1040,9 @@ async function syncPushNow({ interactive = false } = {}) {
     }
     syncDirty = false;
     await setSyncLastPush(Date.now());
-    await setSyncBase(syncToken, (envData.items || []).map(syncKeyOf)); // the cloud now holds exactly this
+    const sent = (envData.items || []).map(syncKeyOf);
+    await setSyncBase(syncToken, sent); // the cloud now holds exactly this
+    await dropSyncTombs(syncToken, sent); // re-added on purpose -> no longer "deleted"
     return true;
   } catch (e) {
     if (interactive) alert("クラウドへの保存に失敗しました（通信エラー）。Worker URL を確認してください。\n" + (e && e.message ? e.message : String(e)));
@@ -1085,7 +1087,7 @@ async function syncPullMerge({ notify = false, hops = 0 } = {}) {
   const local = await getItems();
   const localEmpty = local.every((i) => normUrl(i.url) === normUrl(SEED_BASE.url)); // [] -> true
   const base = inAndroidApp() ? await getSyncBase(syncToken) : null; // what the cloud held at our last sync
-  const tombs = inAndroidApp() ? new Set(await getSyncTombs()) : null; // deleted on this phone
+  const tombs = inAndroidApp() ? new Set(await getSyncTombs(syncToken)) : null; // deleted on this phone (this account)
   if (tombs && tombs.size) incoming = incoming.filter((i) => !tombs.has(syncKeyOf(i)));
   syncApplying = true;
   try {
@@ -1872,6 +1874,7 @@ async function signIn(secret, { legacy = false } = {}) {
 }
 async function signOut() {
   syncDirty = false; if (syncPushTimer) { clearTimeout(syncPushTimer); syncPushTimer = null; }
+  await clearSyncMemory(); // base + deletion marks belong to the account being left
   await setSyncEnabled(false); syncEnabled = false;
   await setSyncToken(""); syncToken = "";
   await setSyncPass(""); syncPass = "";
