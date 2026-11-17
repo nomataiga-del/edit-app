@@ -45,6 +45,19 @@ let workerUrl = "";             // optional extract-proxy for non-Shopify (mobil
 // take the endpoint down with it (it is public infrastructure, not a secret).
 // For a future multi-user release, ship "" and let each user set their own.
 const DEFAULT_WORKER = "https://fragrant-dust-0d49.noma-taiga.workers.dev";
+// Where are we running? An Android *browser* (a Chrome tab or the old home-screen
+// PWA) keeps its data in Chrome's site storage, which gets wiped wholesale — so it
+// may no longer hold favourites; it only points to the Android app (showMoveToApp).
+// The Android app is this same page inside the app's own WebView: "; wv)" in the
+// UA, or the Capacitor bridge.
+const UA = (window.navigator && window.navigator.userAgent) || "";
+function inAndroidApp() {
+  const c = window.Capacitor;
+  if (c && typeof c.isNativePlatform === "function" && c.isNativePlatform()) return true;
+  return /Android/i.test(UA) && /; wv\)/.test(UA);
+}
+function inAndroidBrowser() { return !!window.__EDIT_WEB__ && /Android/i.test(UA) && !inAndroidApp(); }
+const APK_URL = "https://github.com/nomataiga-del/edit-app/releases/latest/download/EDIT-android.apk";
 // クラウド同期（自動バックアップ）state — loaded in reload(), driven by the sync block below
 let syncEnabled = false, syncToken = "", syncLastPush = 0, syncLastPull = 0;
 let syncPass = "", loginSkip = false; // 合言葉（この端末の控え）/ web のログイン画面を「あとで」にした
@@ -1869,6 +1882,47 @@ function showLoginGate() {
   setTimeout(() => form._focus && form._focus(), 50);
 }
 
+// Android browser / old PWA: a full-screen pointer to the Android app that cannot
+// be dismissed. Favourites still stored here while logged out can be carried to
+// the cloud first; "moved" is only shown once the cloud really has them.
+function showMoveToApp() {
+  if (document.getElementById("edit-move")) return;
+  const overlay = el("div", { class: "overlay", id: "edit-move", style: "z-index:60;background:var(--paper);" });
+  const left = items.filter((i) => normUrl(i.url) !== normUrl(SEED_BASE.url)).length;
+  const note = (text) => el("div", { style: "font-size:13px;line-height:1.8;margin-top:10px;", text });
+  const rule = () => el("div", { style: "border-top:1px dashed var(--line);margin-top:16px;padding-top:4px;" });
+  const moveBox = el("div");
+  if (!loggedIn() && left > 0) {
+    moveBox.append(
+      rule(),
+      note(`この EDIT に ${left} 件残っています。`),
+      el("button", { class: "btn btn-ghost", style: "margin-top:6px;", text: "クラウドへ移す", onclick: () => {
+        const since = Date.now();
+        moveBox.innerHTML = "";
+        moveBox.append(rule(), el("div", { style: "margin-top:10px;" }, [loginForm(async () => {
+          let pushed = false; // signIn may still be pushing in the background
+          for (let i = 0; i < 24 && !pushed; i++) {
+            pushed = (await getSyncLastPush()) >= since;
+            if (!pushed) await new Promise((r) => setTimeout(r, 250));
+          }
+          moveBox.innerHTML = "";
+          moveBox.append(rule(), note(pushed
+            ? `${left} 件をクラウドへ移しました。Android 版で同じ合言葉を入れてください。`
+            : "まだ移せていません。電波のよい所で、この画面をもう一度開いてください。"));
+        })]));
+      } }),
+    );
+  }
+  const modal = el("div", { class: "modal sm" }, [
+    el("h2", { class: "serif", text: "この EDIT は使えません" }),
+    note("Chrome の中で動くため、お気に入りが消えます。"),
+    el("a", { class: "btn btn-ink", href: APK_URL, style: "display:block;text-align:center;text-decoration:none;margin:16px 0 4px;", text: "Android 版を入れる" }),
+    note("入れたあと、合言葉を入れると全部戻ります。"),
+    moveBox,
+  ]);
+  overlay.append(modal); document.body.append(overlay);
+}
+
 function openSyncSettings() {
   const overlay = el("div", { class: "overlay", onclick: (e) => { if (e.target === overlay) overlay.remove(); } });
   const fmtTs = (ts) => (ts ? new Date(ts).toLocaleString("ja-JP") : "まだありません");
@@ -1963,22 +2017,26 @@ function openSyncSettings() {
     const d = el("div", { style: "font-size:11px;color:var(--stone);line-height:1.8;background:var(--paper);border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:4px 0 8px;white-space:pre-wrap;", text: "環境情報を取得中…" });
     (async () => {
       try {
-        const ua = navigator.userAgent || "";
+        const ua = UA;
+        const app = inAndroidApp();
         const env = /; wv\)/.test(ua) ? "アプリ内ブラウザ(WebView)⚠️" :
           /SamsungBrowser/i.test(ua) ? "Samsung Internet" :
           /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? "Chrome" :
           /Safari\//.test(ua) ? "Safari" : "不明";
         const standalone = (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
         let persisted = null, usage = null, quota = null;
-        if (navigator.storage) {
-          if (navigator.storage.persist) { try { persisted = (await navigator.storage.persisted()) || (await navigator.storage.persist()); } catch { /* ignore */ } }
-          if (navigator.storage.estimate) { try { const e = await navigator.storage.estimate(); usage = e.usage; quota = e.quota; } catch { /* ignore */ } }
+        const st = window.navigator.storage;
+        if (st) {
+          if (st.persist) { try { persisted = (await st.persisted()) || (await st.persist()); } catch { /* ignore */ } }
+          if (st.estimate) { try { const e = await st.estimate(); usage = e.usage; quota = e.quota; } catch { /* ignore */ } }
         }
         const mb = (n) => n == null ? "?" : (n < 1048576 ? Math.round(n / 1024) + "KB" : Math.round(n / 1048576) + "MB");
-        let t = `実行環境: ${env}${standalone ? "（ホーム画面アプリ✓）" : "（ブラウザタブ）"}\n` +
-          `保存の保護: ${persisted === true ? "許可✓" : persisted === false ? "未許可⚠️（ブラウザの自動整理で消される可能性）" : "確認不可"}\n` +
-          `使用容量: ${mb(usage)} / 空き上限 ${mb(quota)}`;
-        if (persisted === false || !standalone) t += `\n→ 対策: Chromeメニュー⋮→「ホーム画面に追加/アプリをインストール」をして、そのアイコンから起動すると保護されやすくなります。`;
+        let t = app
+          ? `実行環境: EDIT アプリ（Android 版）✓\n保存場所: アプリ専用の領域（Chrome の操作では消えません）\n使用容量: ${mb(usage)}`
+          : `実行環境: ${env}${standalone ? "（ホーム画面アプリ✓）" : "（ブラウザタブ）"}\n` +
+            `保存の保護: ${persisted === true ? "許可✓" : persisted === false ? "未許可⚠️（ブラウザの自動整理で消される可能性）" : "確認不可"}\n` +
+            `使用容量: ${mb(usage)} / 空き上限 ${mb(quota)}`;
+        if (!app && (persisted === false || !standalone)) t += `\n→ 対策: Chromeメニュー⋮→「ホーム画面に追加/アプリをインストール」をして、そのアイコンから起動すると保護されやすくなります。`;
         const flog = forensicsLog();
         if (flog.length) t += "\n\n直近のリセット検知:\n" + flog.slice(-3).map((e) => `${String(e.at || "").slice(0, 16).replace("T", " ")} [${e.kind}] ${e.hint}${e.survived && e.survived.length ? "（残存: " + e.survived.join(",") + "）" : ""}`).join("\n");
         d.textContent = t;
@@ -2024,6 +2082,13 @@ window.__EDIT_BOOT__ = reload().then(async () => {
   const scan = await forensicsScan();
   const recovered = await syncAutoRecover();
   forensicsRecord(scan, recovered || !!syncToken);
+  if (inAndroidBrowser()) {
+    // Nothing may be added here any more. If logged in, finish uploading what
+    // this copy still holds, then show only the pointer to the Android app.
+    syncBoot();
+    showMoveToApp();
+    return;
+  }
   await handleHashAdd(); handleShareParam(); syncBoot();
   // Web: not logged in (fresh install or a wiped device whose cookie is gone too)
   // -> plain login screen, unless the user chose「あとで」.
