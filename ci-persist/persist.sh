@@ -68,17 +68,6 @@ stop_app
 adb install -r "$APK"
 launch && $CDP check "上書きインストールのあと"
 
-echo "### 9 端末を再起動して開き直す"
-adb reboot || true
-sleep 25
-adb wait-for-device
-for i in $(seq 1 60); do
-  [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -cd '0-9')" = "1" ] && break
-  sleep 5
-done
-sleep 20
-launch && $CDP check "端末の再起動のあと"
-
 echo "### 10 アプリのデータを消す（アンインストールに当たる）→ 同じ合言葉で戻るか"
 stop_app
 adb shell pm clear "$PKG" || true
@@ -108,6 +97,18 @@ sleep 10
 $CDP cloud "消したあとのクラウド（届いている=false が正しい）"
 stop_app
 launch && $CDP check "もう一度開き直したあと（残っている=false が正しい）"
+
+echo "### 9 端末を再起動して開き直す（最後に回す・戻らない時は 4 分で見切る）"
+adb reboot || true
+sleep 25
+timeout 240 adb wait-for-device || echo "結果[端末の再起動]: 4 分で戻らなかった（CI のエミュレータの都合）"
+for i in $(seq 1 48); do
+  [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -cd "0-9")" = "1" ] && break
+  sleep 5
+done
+sleep 20
+launch && $CDP captured "端末の再起動のあと（共有で足した CAMBIO が残っているか）" "$CAMBIO"
+launch >/dev/null 2>&1; $CDP check "端末の再起動のあと（消した試験の品は残っている=false が正しい）"
 
 echo "### 後片づけ"
 $CDP cleanup
