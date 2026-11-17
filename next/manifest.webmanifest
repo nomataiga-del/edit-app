@@ -1,0 +1,20 @@
+{
+  "name": "EDIT — 横断クローゼット",
+  "short_name": "EDIT",
+  "description": "気になった服を横断で保存・比較・サイズ確認するクローゼット。",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#EDECE8",
+  "theme_color": "#EDECE8",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "icon-128.png", "sizes": "128x128", "type": "image/png" }
+  ],
+  "share_target": {
+    "action": ".",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}

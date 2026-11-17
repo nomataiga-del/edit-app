@@ -87,6 +87,27 @@ $CDP login "入れ直しのログイン"
 sleep 6
 $CDP check "同じ合言葉でログインし直したあと"
 
+echo "### 11 アプリの組み込み通信で、取得代行に断られる商品ページを読めるか（参考）"
+CAMBIO="https://www.cambio.co.jp/c/brand/jihnunc/mp15204"
+MUSINSA="https://global.musinsa.com/jp/products/5915362"
+$CDP native "組み込み通信で CAMBIO" "$CAMBIO"
+$CDP native "組み込み通信で MUSINSA" "$MUSINSA"
+
+echo "### 12 共有で CAMBIO の商品を足す（取得代行は 406 で断る）→ 写真が入るか"
+adb shell am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "$CAMBIO" -n "$PKG/.MainActivity" >/dev/null 2>&1 || true
+sleep 30
+$CDP captured "共有で足した CAMBIO" "$CAMBIO"
+
+echo "### 13 試験の品を消して、すぐ共有で開き直す → 消した物が戻らないか"
+$CDP delete "画面の削除ボタンで消す"
+adb shell am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "https://example.com/products/after-delete-check" -n "$PKG/.MainActivity" >/dev/null 2>&1 || true
+sleep 25
+$CDP check "消して共有で開き直したあと（残っている=false が正しい）"
+sleep 10
+$CDP cloud "消したあとのクラウド（届いている=false が正しい）"
+stop_app
+launch && $CDP check "もう一度開き直したあと（残っている=false が正しい）"
+
 echo "### 後片づけ"
 $CDP cleanup
 echo "試験おわり"

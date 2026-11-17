@@ -104,6 +104,42 @@ try {
       const ua = (j.diag || []).map((e) => (e.env && e.env.ua) || "").pop() || "";
       console.log(`結果[${label || "クラウド"}]: 試験の品が届いている=${has} / 件数=${(j.items || []).length} / 保存した時刻=${jst(Date.parse(j.exportedAt))}${ua ? " / 保存した端末=" + (/; wv\)/.test(ua) ? "アプリ内の WebView" : "ブラウザ") : ""}`);
     }
+  } else if (step === "native") {
+    // アプリの組み込み通信（CapacitorHttp）で、ページから商品ページを読めるか
+    const url = process.argv[4];
+    const r = JSON.parse(await evaluate(`(async () => {
+      const h = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.CapacitorHttp;
+      if (!h || typeof h.get !== "function") return JSON.stringify({ ok: false, why: "CapacitorHttp が無い" });
+      try {
+        const r = await h.get({ url: ${JSON.stringify(url)}, headers: { "User-Agent": navigator.userAgent.replace("; wv)", ")"), "Accept": "text/html" }, responseType: "text", connectTimeout: 10000, readTimeout: 15000 });
+        return JSON.stringify({ ok: true, status: r.status, size: String(r.data || "").length, ogImage: /og:image/.test(String(r.data || "")) });
+      } catch (e) { return JSON.stringify({ ok: false, why: String(e && e.message || e) }); }
+    })()`));
+    console.log(`結果[${label}]: ${r.ok ? `応答 ${r.status} / 大きさ ${r.size} / 写真の手がかり(og:image)=${r.ogImage}` : "読めない（" + r.why + "）"}`);
+  } else if (step === "captured") {
+    // 共有で足した物に、写真・名前・値段が入ったか
+    const url = process.argv[4];
+    const r = JSON.parse(await evaluate(`(async () => {
+      const items = JSON.parse(localStorage.getItem("edit_ls_edit_items_v1") || "[]");
+      const it = items.find((i) => String(i.url || "").split("?")[0] === ${JSON.stringify(url)});
+      const modal = !!document.querySelector(".overlay .modal");
+      return JSON.stringify(it ? { found: true, image: it.image || "", name: it.name || "", price: it.price || "", modal } : { found: false, modal });
+    })()`));
+    console.log(`結果[${label}]: 足された=${r.found}${r.found ? ` / 写真=${r.image ? "あり" : "空"} / 名前=${String(r.name).slice(0, 30)} / 値段=${r.price || "空"}` : ""} / 手入力の画面が出ている=${r.modal}`);
+  } else if (step === "delete") {
+    // 試験の品を画面の削除ボタンで消す
+    const r = JSON.parse(await evaluate(`(async () => {
+      window.confirm = () => true;
+      const card = [...document.querySelectorAll(".card")].find((c) => c.textContent.includes(${JSON.stringify(ITEM.name)}));
+      if (!card) return JSON.stringify({ ok: false, why: "カードが無い" });
+      const b = [...card.querySelectorAll("button")].find((x) => /🗑/.test(x.textContent));
+      if (!b) return JSON.stringify({ ok: false, why: "削除ボタンが無い" });
+      b.click();
+      await new Promise((r) => setTimeout(r, 300));
+      const items = JSON.parse(localStorage.getItem("edit_ls_edit_items_v1") || "[]");
+      return JSON.stringify({ ok: true, left: items.some((i) => String(i.url || "").includes(${JSON.stringify(RUN)})) });
+    })()`));
+    console.log(`結果[${label}]: ${r.ok ? "消した（手元に残っている=" + r.left + "）" : "消せない（" + r.why + "）"}`);
   } else if (step === "cleanup") {
     const body = JSON.stringify({ app: "EDIT", kind: "edit-export", version: 1, exportedAt: new Date().toISOString(), count: 0, items: [], outfits: [], bases: {}, categories: [] });
     const r = await fetch(`${W}/sync?token=${tokenOf(PASS)}&force=1`, { method: "PUT", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(20000) });
