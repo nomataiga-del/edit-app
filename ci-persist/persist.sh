@@ -94,13 +94,14 @@ $CDP native "組み込み通信で CAMBIO" "$CAMBIO"
 $CDP native "組み込み通信で MUSINSA" "$MUSINSA"
 
 echo "### 12 共有で CAMBIO の商品を足す（取得代行は 406 で断る）→ 写真が入るか"
-adb shell am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "$CAMBIO" -n "$PKG/.MainActivity" >/dev/null 2>&1 || true
+# 共有を受けたアプリは「?text=」付きで開き直す（MainActivity）。同じ開き直しを、いま読み込んでいる版（本番か next/）のままページの中から行う
+$CDP share "$CAMBIO"
 sleep 30
 $CDP captured "共有で足した CAMBIO" "$CAMBIO"
 
 echo "### 13 試験の品を消して、すぐ共有で開き直す → 消した物が戻らないか"
 $CDP delete "画面の削除ボタンで消す"
-adb shell am start -a android.intent.action.SEND -t text/plain --es android.intent.extra.TEXT "https://example.com/products/after-delete-check" -n "$PKG/.MainActivity" >/dev/null 2>&1 || true
+$CDP share "https://example.com/products/after-delete-check"
 sleep 25
 $CDP check "消して共有で開き直したあと（残っている=false が正しい）"
 sleep 10

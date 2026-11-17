@@ -184,9 +184,21 @@ export async function getSyncBase(token) {
   return b && b.token === token && Array.isArray(b.keys) ? b.keys : null; // another account -> unknown
 }
 export async function setSyncBase(token, keys) { await chrome.storage.local.set({ [KEY_SYNC_BASE]: { token, keys: [...new Set(keys)] } }); }
-export function mergePrimary(local, incoming, baseKeys) {
+// Deleted on this phone: { key: deletedAt }. Protects against a stale cloud read
+// (KV can return the pre-delete copy for a while) bringing a deletion back.
+export const KEY_SYNC_TOMB = "edit_sync_tomb_v1";
+const TOMB_KEEP_MS = 180 * 86400000;
+export async function getSyncTombs() { const r = await chrome.storage.local.get(KEY_SYNC_TOMB); return Object.keys(r[KEY_SYNC_TOMB] || {}); }
+export async function addSyncTombs(keys, now = Date.now()) {
+  const r = await chrome.storage.local.get(KEY_SYNC_TOMB);
+  const t = { ...(r[KEY_SYNC_TOMB] || {}) };
+  for (const k of keys || []) if (k) t[k] = now;
+  for (const k of Object.keys(t)) if (now - t[k] > TOMB_KEEP_MS) delete t[k];
+  await chrome.storage.local.set({ [KEY_SYNC_TOMB]: t });
+}
+export function mergePrimary(local, incoming, baseKeys, tombKeys) {
   const loc = Array.isArray(local) ? local : [];
-  const base = new Set(baseKeys || []);
+  const base = new Set([...(baseKeys || []), ...(tombKeys || [])]); // seen before, or deleted here
   const have = new Set(loc.map(syncKeyOf));
   let dropped = 0;
   const add = [];

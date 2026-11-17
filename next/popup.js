@@ -17,7 +17,7 @@ import {
   validSyncToken, syncEndpoint, changesNeedPush, remapImportedBases,
   SYNC_PUSH_DEBOUNCE_MS,
   getSyncPass, setSyncPass, getLoginSkip, setLoginSkip, deriveSyncKey, normalizePassphrase, PASSPHRASE_MIN,
-  mergePrimary, syncKeyOf, getSyncBase, setSyncBase,
+  mergePrimary, syncKeyOf, getSyncBase, setSyncBase, getSyncTombs, addSyncTombs,
 } from "./store.js";
 import { extractProduct, DOMAIN_RULES, shopifyProductJsonUrl, shopifyFromJson, guessCategory } from "./extract.js";
 
@@ -822,6 +822,8 @@ async function toggleStatus(id) {
   await setItems(items); update();
 }
 async function removeItem(id) {
+  const gone = items.find((i) => i.id === id);
+  if (gone && canWriteCloud()) await addSyncTombs([syncKeyOf(gone)]); // a stale cloud copy must not revive it
   items = items.filter((i) => i.id !== id);
   compareIds = compareIds.filter((x) => x !== id);
   const pruned = pruneItemFromOutfits(outfits, id);
@@ -1083,6 +1085,8 @@ async function syncPullMerge({ notify = false, hops = 0 } = {}) {
   const local = await getItems();
   const localEmpty = local.every((i) => normUrl(i.url) === normUrl(SEED_BASE.url)); // [] -> true
   const base = inAndroidApp() ? await getSyncBase(syncToken) : null; // what the cloud held at our last sync
+  const tombs = inAndroidApp() ? new Set(await getSyncTombs()) : null; // deleted on this phone
+  if (tombs && tombs.size) incoming = incoming.filter((i) => !tombs.has(syncKeyOf(i)));
   syncApplying = true;
   try {
     if (localEmpty && incoming.length) {
@@ -1101,7 +1105,7 @@ async function syncPullMerge({ notify = false, hops = 0 } = {}) {
     }
     // phone with a known base: the phone wins and its deletions stick (mergePrimary);
     // first sync of this account on this device / other devices: union as before
-    const { items: merged, added } = base ? mergePrimary(local, incoming, base) : mergeImport(local, incoming);
+    const { items: merged, added } = base ? mergePrimary(local, incoming, base, tombs ? [...tombs] : []) : mergeImport(local, incoming);
     await setItems(merged);
     await setSyncLastPull(Date.now());
     if (notify && added) toast(`クラウドから${added}件追加しました`);

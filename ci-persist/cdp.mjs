@@ -140,6 +140,10 @@ try {
       return JSON.stringify({ ok: true, left: items.some((i) => String(i.url || "").includes(${JSON.stringify(RUN)})) });
     })()`));
     console.log(`結果[${label}]: ${r.ok ? "消した（手元に残っている=" + r.left + "）" : "消せない（" + r.why + "）"}`);
+  } else if (step === "share") {
+    // 共有で開き直したのと同じ形（?text= を付けて読み直す）
+    const text = process.argv[3];
+    console.log("  " + (await evaluate(`(() => { setTimeout(() => { location.href = location.pathname + "?text=" + encodeURIComponent(${JSON.stringify(text)}); }, 200); return "共有と同じ形で開き直す"; })()`)));
   } else if (step === "cleanup") {
     const body = JSON.stringify({ app: "EDIT", kind: "edit-export", version: 1, exportedAt: new Date().toISOString(), count: 0, items: [], outfits: [], bases: {}, categories: [] });
     const r = await fetch(`${W}/sync?token=${tokenOf(PASS)}&force=1`, { method: "PUT", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(20000) });
