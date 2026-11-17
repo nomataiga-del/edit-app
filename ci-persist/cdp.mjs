@@ -51,6 +51,10 @@ const STATE = `(async () => {
     count: items.length,
     hasRunItem: items.some((i) => String(i.url || "").includes(${JSON.stringify(RUN)})),
     persisted,
+    cap: !!window.Capacitor,
+    capNative: !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform()),
+    capPlatform: (window.Capacitor && typeof window.Capacitor.getPlatform === "function") ? window.Capacitor.getPlatform() : null,
+    moveGuide: !!document.getElementById("edit-move"),
     keys: Object.keys(localStorage).length,
     shown: (document.getElementById("app") || {}).textContent ? document.getElementById("app").textContent.includes(${JSON.stringify(RUN)}) : false,
   });
@@ -82,6 +86,7 @@ try {
     const s = JSON.parse(await evaluate(STATE));
     console.log(`結果[${label || "状態"}]: 端末の種類=${/; wv\)/.test(s.ua) ? "アプリ内の WebView" : "ブラウザ"} / ログイン画面=${s.loginGate} / ログイン中=${s.loggedIn} / 件数=${s.count} / 保存キーの数=${s.keys} / 保存の保護=${s.persisted}`);
     console.log("  UA: " + s.ua);
+    console.log(`  アプリの印: Capacitor あり=${s.cap} / ネイティブ=${s.capNative} / 種類=${s.capPlatform} / 「Android 版へ」の案内が出ている=${s.moveGuide}`);
   } else if (step === "login") {
     const r = JSON.parse(await evaluate(LOGIN));
     console.log(`結果[${label || "ログイン"}]: ${r.error ? "失敗 " + r.error : "ログイン画面が消えた=" + r.gateGone + " / 出た表示=" + JSON.stringify(r.dialogs) + " / お知らせ=" + r.toast}`);
@@ -89,7 +94,7 @@ try {
     console.log("  " + (await evaluate(ADD)));
   } else if (step === "check") {
     const s = JSON.parse(await evaluate(STATE));
-    console.log(`結果[${label}]: 試験の品が残っている=${s.hasRunItem} / 画面に出ている=${s.shown} / ログイン中=${s.loggedIn} / 件数=${s.count} / ログイン画面=${s.loginGate} / 最後の保存=${jst(s.lastPush)}`);
+    console.log(`結果[${label}]: 試験の品が残っている=${s.hasRunItem} / 画面に出ている=${s.shown} / ログイン中=${s.loggedIn} / 件数=${s.count} / ログイン画面=${s.loginGate} / 「Android 版へ」の案内=${s.moveGuide} / 最後の保存=${jst(s.lastPush)}`);
   } else if (step === "cloud") {
     const r = await fetch(`${W}/sync?token=${tokenOf(PASS)}`, { signal: AbortSignal.timeout(20000) });
     if (!r.ok) { console.log(`結果[${label || "クラウド"}]: 応答 ${r.status}（まだ何も無い）`); }
