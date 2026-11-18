@@ -146,5 +146,18 @@ html, body { width: 100% !important; height: 100vh !important; height: 100dvh !i
   .scroll { padding: 8px 12px 24px; }
 }
 
-/* iOS safe-area padding at the bottom */
-.scroll { padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+/* Edge-to-edge (Android app on Android 15+, iOS standalone): the status bar and
+   the gesture bar are drawn over the page. The Android app (Capacitor 8,
+   SystemBars insetsHandling "css") passes their sizes as --safe-area-inset-*
+   (0 when it pads natively, e.g. older WebViews); browsers report env(). Take the
+   larger so the top row (EDIT・＋追加・⋯) never sits under the clock. */
+:root {
+  --edit-safe-top: max(var(--safe-area-inset-top, 0px), env(safe-area-inset-top, 0px));
+  --edit-safe-bottom: max(var(--safe-area-inset-bottom, 0px), env(safe-area-inset-bottom, 0px));
+  --edit-safe-left: max(var(--safe-area-inset-left, 0px), env(safe-area-inset-left, 0px));
+  --edit-safe-right: max(var(--safe-area-inset-right, 0px), env(safe-area-inset-right, 0px));
+}
+body { padding: var(--edit-safe-top) var(--edit-safe-right) 0 var(--edit-safe-left); }
+.scroll { padding-bottom: calc(24px + var(--edit-safe-bottom)); }
+.overlay { padding-top: calc(14px + var(--edit-safe-top)); padding-bottom: calc(14px + var(--edit-safe-bottom)); }
+#edit-toast { bottom: calc(24px + var(--edit-safe-bottom)) !important; }
