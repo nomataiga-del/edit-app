@@ -17,6 +17,7 @@ import {
   validSyncToken, syncEndpoint, changesNeedPush, remapImportedBases,
   SYNC_PUSH_DEBOUNCE_MS,
   getSyncPass, setSyncPass, getLoginSkip, setLoginSkip, deriveSyncKey, normalizePassphrase, PASSPHRASE_MIN,
+  mergePrimary, syncKeyOf, getSyncBase, setSyncBase, getSyncTombs, addSyncTombs, dropSyncTombs, clearSyncMemory,
 } from "./store.js";
 import { extractProduct, DOMAIN_RULES, shopifyProductJsonUrl, shopifyFromJson, guessCategory } from "./extract.js";
 
@@ -52,11 +53,16 @@ const DEFAULT_WORKER = "https://fragrant-dust-0d49.noma-taiga.workers.dev";
 // UA, or the Capacitor bridge.
 const UA = (window.navigator && window.navigator.userAgent) || "";
 function inAndroidApp() {
+  // only the app's own bridge counts — an in-app browser (LINE etc.) also has "; wv)"
   const c = window.Capacitor;
-  if (c && typeof c.isNativePlatform === "function" && c.isNativePlatform()) return true;
-  return /Android/i.test(UA) && /; wv\)/.test(UA);
+  return !!(c && typeof c.isNativePlatform === "function" && c.isNativePlatform());
 }
 function inAndroidBrowser() { return !!window.__EDIT_WEB__ && /Android/i.test(UA) && !inAndroidApp(); }
+// The phone app is the source of truth (野間さん 2026-11-18「スマホを正」・PC は見ない):
+// only it writes to the cloud. Other devices (the PC extension, browsers) only
+// read. The one exception is the explicit「クラウドへ移す」in showMoveToApp.
+let syncWriteOverride = false;
+function canWriteCloud() { return inAndroidApp() || syncWriteOverride; }
 const APK_URL = "https://github.com/nomataiga-del/edit-app/releases/latest/download/EDIT-android.apk";
 // クラウド同期（自動バックアップ）state — loaded in reload(), driven by the sync block below
 let syncEnabled = false, syncToken = "", syncLastPush = 0, syncLastPull = 0;
@@ -816,6 +822,8 @@ async function toggleStatus(id) {
   await setItems(items); update();
 }
 async function removeItem(id) {
+  const gone = items.find((i) => i.id === id);
+  if (gone && canWriteCloud() && syncToken) await addSyncTombs(syncToken, [syncKeyOf(gone)]); // a stale cloud copy must not revive it
   items = items.filter((i) => i.id !== id);
   compareIds = compareIds.filter((x) => x !== id);
   const pruned = pruneItemFromOutfits(outfits, id);
@@ -824,6 +832,7 @@ async function removeItem(id) {
   const prunedBases = pruneBaseItem(bases, id);
   if (JSON.stringify(prunedBases) !== JSON.stringify(bases)) { bases = prunedBases; await setBases(bases); }
   update();
+  if (syncReady() && canWriteCloud()) syncPushNow(); // a deletion goes up at once, not after 30 s
 }
 function toggleCompare(id) {
   if (compareIds.includes(id)) compareIds = compareIds.filter((x) => x !== id);
@@ -850,13 +859,16 @@ async function recheck(it, btn) {
         }
       } catch { /* fall through to generic */ }
     }
-    // Generic fallback (static HTML) when Shopify didn't yield fields
+    // Generic fallback (static HTML) when Shopify didn't yield fields — in the
+    // Android app read it from the phone itself (no CORS), else a plain fetch
     if (!patch.image || !patch.price) {
-      const res = await fetch(it.url, { credentials: "omit", signal: AbortSignal.timeout(10000) });
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const doc = new DOMParser().parseFromString(await res.text(), "text/html");
-      const loc = { href: it.url, hostname: new URL(it.url).hostname };
-      const fresh = extractProduct(doc, loc, DOMAIN_RULES);
+      let fresh = await pageDataNative(it.url);
+      if (!fresh) {
+        const res = await fetch(it.url, { credentials: "omit", signal: AbortSignal.timeout(10000) });
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+        fresh = extractProduct(doc, { href: it.url, hostname: new URL(it.url).hostname }, DOMAIN_RULES);
+      }
       for (const k of ["price", "currency", "availability", "sizes", "image", "name", "brand"]) {
         if (fresh[k] && !patch[k]) patch[k] = fresh[k];
       }
@@ -998,7 +1010,7 @@ async function fullExportEnvelope() {
 
 // PUT the full envelope now. Returns true on success.
 async function syncPushNow({ interactive = false } = {}) {
-  if (!syncReady()) return false;
+  if (!syncReady() || !canWriteCloud()) return false;
   if (syncPushTimer) { clearTimeout(syncPushTimer); syncPushTimer = null; }
   try {
     const envData = await fullExportEnvelope();
@@ -1028,6 +1040,9 @@ async function syncPushNow({ interactive = false } = {}) {
     }
     syncDirty = false;
     await setSyncLastPush(Date.now());
+    const sent = (envData.items || []).map(syncKeyOf);
+    await setSyncBase(syncToken, sent); // the cloud now holds exactly this
+    await dropSyncTombs(syncToken, sent); // re-added on purpose -> no longer "deleted"
     return true;
   } catch (e) {
     if (interactive) alert("クラウドへの保存に失敗しました（通信エラー）。Worker URL を確認してください。\n" + (e && e.message ? e.message : String(e)));
@@ -1038,6 +1053,7 @@ async function syncPushNow({ interactive = false } = {}) {
 // Debounced push after a data change — keeps KV writes well under the
 // free tier's 1,000/day even during a long editing session.
 function scheduleSyncPush() {
+  if (!canWriteCloud()) return; // read-only device: never queue an upload
   syncDirty = true;
   if (!syncReady()) return; // stays dirty; pushed after 同期ON or on the next change
   if (syncPushTimer) clearTimeout(syncPushTimer);
@@ -1070,6 +1086,9 @@ async function syncPullMerge({ notify = false, hops = 0 } = {}) {
 
   const local = await getItems();
   const localEmpty = local.every((i) => normUrl(i.url) === normUrl(SEED_BASE.url)); // [] -> true
+  const base = inAndroidApp() ? await getSyncBase(syncToken) : null; // what the cloud held at our last sync
+  const tombs = inAndroidApp() ? new Set(await getSyncTombs(syncToken)) : null; // deleted on this phone (this account)
+  if (tombs && tombs.size) incoming = incoming.filter((i) => !tombs.has(syncKeyOf(i)));
   syncApplying = true;
   try {
     if (localEmpty && incoming.length) {
@@ -1082,10 +1101,13 @@ async function syncPullMerge({ notify = false, hops = 0 } = {}) {
       }
       if (Array.isArray(parsed.categories) && parsed.categories.length) await setCategories(parsed.categories);
       await setSyncLastPull(Date.now());
+      if (inAndroidApp()) await setSyncBase(syncToken, merged.map(syncKeyOf));
       toast(`クラウドから${added}件復元しました`);
       return "restored";
     }
-    const { items: merged, added } = mergeImport(local, incoming);
+    // phone with a known base: the phone wins and its deletions stick (mergePrimary);
+    // first sync of this account on this device / other devices: union as before
+    const { items: merged, added } = base ? mergePrimary(local, incoming, base, tombs ? [...tombs] : []) : mergeImport(local, incoming);
     await setItems(merged);
     await setSyncLastPull(Date.now());
     if (notify && added) toast(`クラウドから${added}件追加しました`);
@@ -1140,6 +1162,8 @@ async function syncNow() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden" && syncDirty && syncReady()) syncPushNow();
 });
+// A share into the app reloads the page (MainActivity.loadUrl): flush first.
+window.addEventListener("pagehide", () => { if (syncDirty && syncReady()) syncPushNow(); });
 
 function clipCurrent() {
   if (window.__EDIT_WEB__) { openWebAdd(); return; }
@@ -1181,7 +1205,48 @@ async function webCaptureUrl(url, fallbackName) {
 async function tryAutoCapture(url, fallbackName) {
   if (workerUrl && await captureViaWorker(url, fallbackName)) return true;
   if (shopifyProductJsonUrl(url) && await captureShopifyClientSide(url, fallbackName)) return true;
+  if (await captureNative(url, fallbackName)) return true;
   return false;
+}
+
+// Some shops refuse the Cloudflare worker (MUSINSA 403, CAMBIO 406) but answer
+// a phone. In the Android app, read the page from the phone itself through the
+// app's native HTTP (CapacitorHttp — no CORS) and run the same extractor.
+function nativeHttp() {
+  const c = window.Capacitor;
+  const h = inAndroidApp() && c && c.Plugins && c.Plugins.CapacitorHttp;
+  return h && typeof h.get === "function" ? h : null;
+}
+async function pageDataNative(url) {
+  const http = nativeHttp();
+  if (!http || !/^https?:\/\//i.test(url || "")) return null;
+  try {
+    const r = await http.get({
+      url,
+      headers: { "User-Agent": UA.replace("; wv)", ")"), "Accept": "text/html,application/xhtml+xml", "Accept-Language": "ja,en;q=0.8" },
+      responseType: "text", connectTimeout: 10000, readTimeout: 15000,
+    });
+    if (!r || r.status < 200 || r.status >= 300 || typeof r.data !== "string" || !r.data) return null;
+    const doc = new DOMParser().parseFromString(r.data, "text/html");
+    const d = extractProduct(doc, { href: url, hostname: new URL(url).hostname }, DOMAIN_RULES);
+    return d && (d.name || d.image || d.price) ? d : null;
+  } catch { return null; }
+}
+async function captureNative(url, fallbackName) {
+  const d = await pageDataNative(url);
+  if (!d) return false;
+  let host = ""; try { host = new URL(url).hostname.replace(/^www\./, ""); } catch { /* noop */ }
+  const cur = d.currency || guessCurrencyByTld(host);
+  const g = guessCategory([d.name, fallbackName].join(" "));
+  const { id } = await addItem({
+    url, domain: host, site: siteNameFromDomain(host),
+    name: d.name || fallbackName || "", brand: d.brand || "", price: d.price || "",
+    currency: cur, image: d.image || "", availability: d.availability || "",
+    sizes: d.sizes || "", measuresBySize: (d.measuresBySize && typeof d.measuresBySize === "object") ? d.measuresBySize : {},
+    major: g.major, sub: g.sub,
+  });
+  await afterCapture(id, cur);
+  return true;
 }
 
 // After an add/update, open the just-saved item by its id — NOT items[0], which
@@ -1311,6 +1376,14 @@ async function fetchItemData(url, fallbackName) {
       }
     } catch { /* noop */ }
   }
+  const n = await pageDataNative(url); // the worker was refused: read it from the phone
+  if (n) {
+    let host = ""; try { host = new URL(url).hostname; } catch { /* noop */ }
+    n._curAuth = !!n.currency;
+    if (!n.currency) n.currency = guessCurrencyByTld(host);
+    const g = guessCategory([n.name, fallbackName].join(" "));
+    return { ...n, major: g.major, sub: g.sub };
+  }
   return null;
 }
 
@@ -1391,7 +1464,7 @@ function openDangerZone() {
     if (!confirm(`本当に ${n} 件すべて（お気に入り・コーデ・サイズ基準）を削除しますか？\nこの操作は元に戻せません。`)) return;
     if (!confirm("最終確認：完全に消去します。よろしいですか？")) return;
     const hadAccount = loggedIn();
-    const wipeCloud = hadAccount && wipeCloudCb.checked;
+    const wipeCloud = hadAccount && canWriteCloud() && wipeCloudCb.checked;
     if (hadAccount && !wipeCloud) {
       // keep the cloud copy: sign out BEFORE wiping so nothing propagates;
       // logging in again with the same 合言葉 brings everything back
@@ -1420,7 +1493,7 @@ function openDangerZone() {
       el("br"), el("b", { style: "color:var(--accent);", text: "元に戻せません。" }), " 先にバックアップの保存をおすすめします。",
     ]),
     el("button", { class: "btn btn-ghost", style: "width:100%;margin-bottom:14px;", text: "⬇ バックアップを保存（JSON）", onclick: async () => { await exportJson(); } }),
-    loggedIn() ? el("label", { style: "display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.6;margin-bottom:12px;cursor:pointer;" }, [
+    (loggedIn() && canWriteCloud()) ? el("label", { style: "display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.6;margin-bottom:12px;cursor:pointer;" }, [
       wipeCloudCb,
       el("span", {}, ["クラウドのデータも消去する", el("br"), el("span", { style: "color:var(--stone);font-size:11.5px;", text: "オフのまま消すと、この端末からログアウトするだけでクラウド側は残ります（同じ合言葉で再ログインすれば全部戻ります・推奨）。" })]),
     ]) : null,
@@ -1801,6 +1874,7 @@ async function signIn(secret, { legacy = false } = {}) {
 }
 async function signOut() {
   syncDirty = false; if (syncPushTimer) { clearTimeout(syncPushTimer); syncPushTimer = null; }
+  await clearSyncMemory(); // base + deletion marks belong to the account being left
   await setSyncEnabled(false); syncEnabled = false;
   await setSyncToken(""); syncToken = "";
   await setSyncPass(""); syncPass = "";
@@ -1898,6 +1972,7 @@ function showMoveToApp() {
       note(`この EDIT に ${left} 件残っています。`),
       el("button", { class: "btn btn-ghost", style: "margin-top:6px;", text: "クラウドへ移す", onclick: () => {
         const since = Date.now();
+        syncWriteOverride = true; // the one explicit upload allowed from a non-phone device
         moveBox.innerHTML = "";
         moveBox.append(rule(), el("div", { style: "margin-top:10px;" }, [loginForm(async () => {
           let pushed = false; // signIn may still be pushing in the background
@@ -1981,6 +2056,21 @@ function openSyncSettings() {
   const body = el("div");
   const render = () => {
     body.innerHTML = "";
+    if (loggedIn() && !canWriteCloud()) {
+      body.append(
+        el("div", { style: "font-size:13px;line-height:1.9;margin-bottom:6px;" }, [
+          el("b", { text: "ログイン中（この端末は見るだけ）" }), el("br"),
+          "クラウドに保存するのは、スマホの EDIT（Android 版）だけです。この端末で足したり消したりしても、スマホには届きません。",
+        ]),
+        el("div", { style: "display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 4px;" }, [
+          el("button", { class: "btn btn-ghost", style: "font-size:12px;color:var(--accent);", text: "ログアウト", onclick: async () => {
+            if (!confirm("ログアウトしますか？\nこの端末のデータはそのまま残り、クラウドのデータも残ります。")) return;
+            await signOut(); render(); renderStatus();
+          } }),
+        ]),
+      );
+      return;
+    }
     if (loggedIn()) {
       let shown = false;
       const passVal = el("span", { style: "font-family:ui-monospace,SFMono-Regular,Consolas,monospace;", text: syncPass ? "●●●●●●" : "（この端末には控えがありません）" });
@@ -2052,15 +2142,15 @@ function openSyncSettings() {
       "変更のたびに自動でクラウド（あなた専用の Cloudflare Worker・無料枠）へ保存され、", el("b", { text: "PCとスマホで同じ合言葉を入れると同じデータ" }), "になります。",
     ]),
     body,
-    status,
-    el("div", { style: "margin:6px 0;" }, [prevBtn]),
+    canWriteCloud() ? status : null,
+    canWriteCloud() ? el("div", { style: "margin:6px 0;" }, [prevBtn]) : null,
     el("details", { style: "font-size:12px;color:var(--stone);margin:6px 0 8px;" }, [
       el("summary", { style: "cursor:pointer;", text: "詳細設定（Worker URL）" }),
       el("div", { class: "fld", style: "margin-top:6px;" }, [el("label", { text: "Worker URL（取得代行・同期で共通）" }), workerI]),
     ]),
     diag,
     el("div", { class: "modal-foot" }, [
-      syncNowBtn,
+      canWriteCloud() ? syncNowBtn : null,
       el("span", { style: "flex:1;" }),
       el("button", { class: "btn btn-ink", text: "閉じる", onclick: () => overlay.remove() }),
     ]),

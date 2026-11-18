@@ -168,6 +168,65 @@ export async function deriveSyncKey(passphrase) {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/* ---------------- スマホ（Android 版）が正の合わせ方 ----------------
+   The phone app is the only device that writes to the cloud. It remembers which
+   items the cloud held at its last successful sync (the "base"). On the next pull:
+   - every local item stays as it is (the phone wins)
+   - a cloud item missing locally but present in the base = deleted on this phone
+     (maybe not uploaded yet, e.g. the app was reopened by a share) -> dropped
+   - a cloud item missing locally and never seen = added elsewhere -> taken
+   This is what stops deleted favourites from coming back. */
+export const KEY_SYNC_BASE = "edit_sync_base_v1"; // { token, keys:[normUrl|id] } at the last successful sync
+export function syncKeyOf(item) { return normUrl(item && item.url) || String((item && item.id) || ""); }
+export async function getSyncBase(token) {
+  const r = await chrome.storage.local.get(KEY_SYNC_BASE);
+  const b = r[KEY_SYNC_BASE];
+  return b && b.token === token && Array.isArray(b.keys) ? b.keys : null; // another account -> unknown
+}
+export async function setSyncBase(token, keys) { await chrome.storage.local.set({ [KEY_SYNC_BASE]: { token, keys: [...new Set(keys)] } }); }
+// Deleted on this phone: { key: deletedAt }. Protects against a stale cloud read
+// (KV can return the pre-delete copy for a while) bringing a deletion back.
+export const KEY_SYNC_TOMB = "edit_sync_tomb_v1";
+const TOMB_KEEP_MS = 180 * 86400000;
+// Per account ({ token, t }), like the base. A key leaves the list as soon as an
+// upload that contains it succeeds (re-added on purpose), and on logout.
+async function readTombs(token) {
+  const r = await chrome.storage.local.get(KEY_SYNC_TOMB);
+  const v = r[KEY_SYNC_TOMB];
+  return v && v.token === token && v.t && typeof v.t === "object" ? { ...v.t } : {};
+}
+export async function getSyncTombs(token) { return Object.keys(await readTombs(token)); }
+export async function addSyncTombs(token, keys, now = Date.now()) {
+  const t = await readTombs(token);
+  for (const k of keys || []) if (k) t[k] = now;
+  for (const k of Object.keys(t)) if (now - t[k] > TOMB_KEEP_MS) delete t[k];
+  await chrome.storage.local.set({ [KEY_SYNC_TOMB]: { token, t } });
+}
+export async function dropSyncTombs(token, keys) {
+  const t = await readTombs(token);
+  let changed = false;
+  for (const k of keys || []) if (k in t) { delete t[k]; changed = true; }
+  if (changed) await chrome.storage.local.set({ [KEY_SYNC_TOMB]: { token, t } });
+}
+export async function clearSyncMemory() { await chrome.storage.local.set({ [KEY_SYNC_TOMB]: null, [KEY_SYNC_BASE]: null }); }
+export function mergePrimary(local, incoming, baseKeys, tombKeys) {
+  const loc = Array.isArray(local) ? local : [];
+  const base = new Set([...(baseKeys || []), ...(tombKeys || [])]); // seen before, or deleted here
+  const have = new Set(loc.map(syncKeyOf));
+  let dropped = 0;
+  const add = [];
+  for (const raw of Array.isArray(incoming) ? incoming : []) {
+    if (!raw || typeof raw !== "object") continue;
+    const it = normalizeImported(raw);
+    const k = syncKeyOf(it);
+    if (have.has(k)) continue;              // both have it -> the phone's version stays
+    if (base.has(k)) { dropped++; continue; } // deleted on this phone
+    have.add(k); add.push(it);              // new from elsewhere
+  }
+  const items = [...loc.map((i) => ({ ...i })), ...add].sort((a, b) => (b._ts || 0) - (a._ts || 0));
+  return { items, added: add.length, dropped };
+}
+
 // Build the worker /sync URL (reuses the 取得代行 worker origin).
 export function syncEndpoint(workerUrl, token) {
   const base = String(workerUrl || "").trim().replace(/\/+$/, "");
